@@ -19,10 +19,9 @@ export function splitItemsByStation(items: OrderItem[]) {
 
 export function calcStationTotals(items: OrderItem[], discountRatio = 0) {
   const rawSubtotal = items.reduce((t, i) => t + i.menuItem.price * i.quantity, 0);
-  const subtotal = parseFloat(rawSubtotal.toFixed(2));
+  const subtotal = parseFloat((rawSubtotal * (1 - discountRatio)).toFixed(2));
   const tax = parseFloat((subtotal * 0.15).toFixed(2));
-  const discountAmount = parseFloat(((subtotal + tax) * discountRatio).toFixed(2));
-  const total = parseFloat((subtotal + tax - discountAmount).toFixed(2));
+  const total = parseFloat((subtotal + tax).toFixed(2));
   return { subtotal, tax, total };
 }
 
