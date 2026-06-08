@@ -6,7 +6,11 @@ import {
   Search, Eye, ChevronDown
 } from "lucide-react";
 
-const ADMIN_KEY = "habesha-admin-2024";
+// Use session token issued after OTP — never expose the raw admin key in the bundle
+const getAdminHeaders = () => ({
+  "Content-Type": "application/json",
+  "X-Admin-Token": sessionStorage.getItem("admin_token") ?? "",
+});
 
 interface TenantRow {
   id: string;
@@ -103,7 +107,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     setLoading(true);
     try {
       const res = await fetch("/api/admin/tenants", {
-        headers: { "X-Admin-Key": ADMIN_KEY },
+        headers: getAdminHeaders(),
       });
       if (res.ok) setTenants(await res.json());
     } finally { setLoading(false); }
@@ -113,7 +117,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     setPayLoading(true);
     try {
       const res = await fetch("/api/admin/payment-status", {
-        headers: { "X-Admin-Key": ADMIN_KEY },
+        headers: getAdminHeaders(),
       });
       if (res.ok) setPaymentList(await res.json());
     } finally { setPayLoading(false); }
@@ -127,7 +131,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     setActionId(id);
     try {
       const res = await fetch(`/api/admin/tenants/${id}/approve`, {
-        method: "POST", headers: { "X-Admin-Key": ADMIN_KEY },
+        method: "POST", headers: getAdminHeaders(),
       });
       if (res.ok) { fetchTenants(); showSuccess("Tenant approved ✓"); }
     } finally { setActionId(null); }
@@ -141,7 +145,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     setActionId(id);
     try {
       await fetch(`/api/admin/tenants/${id}/suspend`, {
-        method: "POST", headers: { "X-Admin-Key": ADMIN_KEY },
+        method: "POST", headers: getAdminHeaders(),
       });
       fetchTenants(); showSuccess("Tenant suspended");
     } finally { setActionId(null); }
@@ -152,7 +156,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     try {
       await fetch(`/api/admin/tenants/${id}/activate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Admin-Key": ADMIN_KEY },
+        headers: getAdminHeaders(),
         body: JSON.stringify({}),
       });
       fetchTenants(); showSuccess("Tenant activated ✓");
@@ -165,7 +169,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     setDeleting(true);
     try {
       const res = await fetch(`/api/admin/tenants/${deleteTarget.id}`, {
-        method: "DELETE", headers: { "X-Admin-Key": ADMIN_KEY },
+        method: "DELETE", headers: getAdminHeaders(),
       });
       if (res.ok) {
         setDeleteTarget(null);
@@ -199,7 +203,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     try {
       const res = await fetch(`/api/admin/tenants/${editForm.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", "X-Admin-Key": ADMIN_KEY },
+        headers: getAdminHeaders(),
         body: JSON.stringify({
           businessName: editForm.businessName,
           ownerName: editForm.ownerName,
@@ -231,7 +235,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     try {
       const res = await fetch("/api/subscription/renew", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Admin-Key": ADMIN_KEY },
+        headers: getAdminHeaders(),
         body: JSON.stringify({
           tenantId: renewForm.tenantId,
           plan: renewForm.plan,

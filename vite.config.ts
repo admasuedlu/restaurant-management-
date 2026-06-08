@@ -11,6 +11,18 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react':  ['react', 'react-dom'],
+            'vendor-lucide': ['lucide-react'],
+            'vendor-motion': ['motion'],
+          },
+        },
+      },
+      chunkSizeWarningLimit: 600,
+    },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},

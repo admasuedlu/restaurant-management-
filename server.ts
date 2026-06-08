@@ -6,10 +6,35 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import nodemailer from "nodemailer";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import bcrypt from "bcryptjs";
 import { pool, initSchema, query, transaction } from "./src/lib/database";
 
 const app  = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+// ─── Security middleware ──────────────────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: false, // Vite/React handles its own CSP
+  crossOriginEmbedderPolicy: false,
+}));
+
+// Global rate limit — 200 requests per minute per IP
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down." },
+}));
+
+// Strict rate limit for auth endpoints — 10 per 15 min
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many attempts, please try again later." },
+});
 
 // ─── Type Definitions ─────────────────────────────────────────────────────────
 
@@ -416,10 +441,35 @@ app.use(express.json());
 
 const ADMIN_KEY = process.env.ADMIN_KEY || "habesha-admin-2024";
 
+// In-memory admin session tokens (token → expiry). Resets on server restart.
+const adminSessions = new Map<string, number>();
+
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (req.headers["x-admin-key"] !== ADMIN_KEY) return res.status(403).json({ error: "Admin access denied" });
-  next();
+  const token  = req.headers["x-admin-token"] as string | undefined;
+  const rawKey = req.headers["x-admin-key"]   as string | undefined;
+  if (token) {
+    const expiry = adminSessions.get(token);
+    if (expiry && expiry > Date.now()) return next();
+    adminSessions.delete(token);
+    return res.status(401).json({ error: "Session expired, please log in again" });
+  }
+  if (rawKey === ADMIN_KEY) return next();
+  return res.status(403).json({ error: "Admin access denied" });
 }
+
+// Issue a session token after OTP verified
+app.post("/api/admin/session", authLimiter, async (req: Request, res: Response) => {
+  const { otp } = req.body;
+  if (!otp) return res.status(400).json({ error: "OTP required" });
+  try {
+    const valid = await verifyOTP(SUPER_ADMIN_EMAIL, otp, "superadmin");
+    if (!valid) return res.status(401).json({ error: "Invalid or expired OTP" });
+    const { randomBytes } = await import("crypto");
+    const token = randomBytes(32).toString("hex");
+    adminSessions.set(token, Date.now() + 8 * 60 * 60 * 1000); // 8h
+    res.json({ token });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
 
 app.get("/api/admin/tenants", requireAdmin, async (_req, res) => {
   try {
@@ -528,7 +578,7 @@ app.post("/api/register", async (req, res) => {
       trialStart: null, trialEnd: null, subscriptionStart: null, subscriptionEnd: null,
       branches: ["main"], createdAt: now.toISOString(),
       monthlyFee: PLAN_LIMITS[plan as SubscriptionPlan]?.price ?? 0,
-      currency: "ETB", ownerPassword: String(password),
+      currency: "ETB", ownerPassword: await bcrypt.hash(String(password), 12),
     });
 
     // Store business_size
@@ -569,7 +619,7 @@ app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
 });
 
 // Verify registration OTP
-app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
+app.post("/api/auth/verify-otp", authLimiter, async (req: Request, res: Response) => {
   const { email, otp } = req.body;
   if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
   try {
@@ -580,7 +630,7 @@ app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
 });
 
 // Send OTP for super admin 2FA — key must be correct first
-app.post("/api/admin/send-otp", async (req: Request, res: Response) => {
+app.post("/api/admin/send-otp", authLimiter, async (req: Request, res: Response) => {
   const { key } = req.body;
   if (!key) return res.status(400).json({ error: "Admin key required" });
   if (key !== process.env.ADMIN_KEY) return res.status(401).json({ error: "Invalid admin key" });
@@ -875,7 +925,7 @@ app.post("/api/auth/lookup-code", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/auth/owner-login", async (req, res) => {
+app.post("/api/auth/owner-login", authLimiter, async (req, res) => {
   const { phone, password } = req.body;
   if (!phone || !password) return res.status(400).json({ error: "Phone and password required" });
   try {
@@ -885,7 +935,18 @@ app.post("/api/auth/owner-login", async (req, res) => {
     if ((tenant.status as string) === "pending")
       return res.status(403).json({ error: "Account pending admin approval. Please wait.", status: "pending" });
     if (!r.rows[0].owner_password) return res.status(401).json({ error: "Password not set. Contact admin." });
-    if (r.rows[0].owner_password !== password) return res.status(401).json({ error: "Incorrect password" });
+    // Support both bcrypt hashes and legacy plain passwords (auto-upgrade on next login)
+    const storedPwd = r.rows[0].owner_password as string;
+    const isHashed  = storedPwd.startsWith("$2");
+    const match     = isHashed
+      ? await bcrypt.compare(password, storedPwd)
+      : storedPwd === password;
+    if (!match) return res.status(401).json({ error: "Incorrect password" });
+    // Auto-upgrade plain password to bcrypt hash
+    if (!isHashed) {
+      const hashed = await bcrypt.hash(password, 12);
+      await query("UPDATE tenants SET owner_password=$1 WHERE id=$2", [hashed, tenant.id]);
+    }
     const { status, trialDaysLeft } = getSubscriptionStatus(tenant);
     if (status === "expired" || status === "suspended" || status === "cancelled")
       return res.status(402).json({ error: "Subscription expired or suspended.", status });

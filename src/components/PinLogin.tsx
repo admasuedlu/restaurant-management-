@@ -181,19 +181,21 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
     finally { setAdminLoading(false); }
   };
 
-  // Step 2: verify OTP → grant access
+  // Step 2: verify OTP → get session token → grant access
   const handleAdminOtpSubmit = async () => {
     if (!adminOtp.trim()) { setAdminError("Enter the OTP code"); return; }
     setAdminLoading(true); setAdminError("");
     try {
-      const res = await fetch("/api/admin/verify-otp", {
+      const res = await fetch("/api/admin/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ otp: adminOtp }),
       });
       const data = await res.json();
-      if (res.ok) onSuperAdmin();
-      else setAdminError(data.error || "Invalid code");
+      if (res.ok) {
+        sessionStorage.setItem("admin_token", data.token);
+        onSuperAdmin();
+      } else setAdminError(data.error || "Invalid code");
     } catch { setAdminError("Network error"); }
     finally { setAdminLoading(false); }
   };
