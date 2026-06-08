@@ -285,6 +285,19 @@ export async function initSchema(): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_payment_logs_tenant ON payment_logs(tenant_id);
 
+      -- Email OTP verifications
+      CREATE TABLE IF NOT EXISTS email_otps (
+        id          TEXT PRIMARY KEY,
+        email       TEXT NOT NULL,
+        otp         TEXT NOT NULL,
+        purpose     TEXT NOT NULL DEFAULT 'register', -- 'register' | 'superadmin'
+        tenant_id   TEXT,
+        expires_at  TIMESTAMPTZ NOT NULL,
+        used        BOOLEAN DEFAULT FALSE,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_email_otps_email ON email_otps(email, purpose);
+
       -- Chapa payment transactions (pending/completed)
       CREATE TABLE IF NOT EXISTS chapa_transactions (
         tx_ref       TEXT PRIMARY KEY,

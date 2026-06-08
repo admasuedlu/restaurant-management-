@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source "../src/**/*.{tsx,ts,js}";
+@source "../*.{tsx,ts,js,html}";
 
 @keyframes pin-shake {
   0%, 100% { transform: translateX(0); }

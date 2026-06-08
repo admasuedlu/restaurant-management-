@@ -5,6 +5,7 @@ import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import nodemailer from "nodemailer";
 import { pool, initSchema, query, transaction } from "./src/lib/database";
 
 const app  = express();
@@ -81,6 +82,89 @@ const PLAN_LIMITS: Record<SubscriptionPlan, { branches: number; staff: number; a
   professional: { branches: 3,  staff: 50,   aiInsights: true,  price: 1499, label: "Professional — 1,499 ETB/mo"      },
   enterprise:   { branches: 99, staff: 9999, aiInsights: true,  price: 3999, label: "Enterprise — 3,999 ETB/mo"        },
 };
+
+// ─── Email / OTP ─────────────────────────────────────────────────────────────
+
+const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || "ediludadmasu@gmail.com";
+
+const emailTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER || "",
+    pass: process.env.EMAIL_PASS || "", // Gmail App Password (not login password)
+  },
+});
+
+function generateOTP(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function sendOTPEmail(to: string, otp: string, purpose: "register" | "superadmin", businessName?: string): Promise<void> {
+  const isAdmin = purpose === "superadmin";
+  const subject = isAdmin
+    ? "🔐 Habesha POS — Super Admin Login OTP"
+    : `✅ Habesha POS — Verify Your Restaurant Registration`;
+
+  const html = isAdmin ? `
+    <div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0f172a;color:#e2e8f0;padding:32px;border-radius:16px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#ef4444);width:56px;height:56px;border-radius:14px;line-height:56px;font-size:24px;font-weight:900;color:#0f172a">H</div>
+        <h2 style="color:#fbbf24;margin:12px 0 4px">Super Admin Access</h2>
+        <p style="color:#64748b;font-size:13px;margin:0">Habesha Restaurant OS</p>
+      </div>
+      <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;text-align:center">
+        <p style="color:#94a3b8;font-size:14px;margin:0 0 16px">Your one-time login code:</p>
+        <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#f59e0b;font-family:monospace">${otp}</div>
+        <p style="color:#64748b;font-size:12px;margin:16px 0 0">Expires in <strong style="color:#fbbf24">10 minutes</strong>. Do not share this code.</p>
+      </div>
+      <p style="color:#475569;font-size:11px;text-align:center;margin-top:24px">If you did not request this, your system may be under attack. Change your admin key immediately.</p>
+    </div>
+  ` : `
+    <div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0f172a;color:#e2e8f0;padding:32px;border-radius:16px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#ef4444);width:56px;height:56px;border-radius:14px;line-height:56px;font-size:24px;font-weight:900;color:#0f172a">H</div>
+        <h2 style="color:#fbbf24;margin:12px 0 4px">Verify Your Email</h2>
+        <p style="color:#64748b;font-size:13px;margin:0">${businessName || "Restaurant Registration"}</p>
+      </div>
+      <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;text-align:center">
+        <p style="color:#94a3b8;font-size:14px;margin:0 0 16px">Your verification code:</p>
+        <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#10b981;font-family:monospace">${otp}</div>
+        <p style="color:#64748b;font-size:12px;margin:16px 0 0">Expires in <strong style="color:#fbbf24">15 minutes</strong>.</p>
+      </div>
+      <p style="color:#475569;font-size:12px;margin-top:20px">Welcome to Habesha POS — the restaurant OS built for Ethiopia. 🇪🇹</p>
+    </div>
+  `;
+
+  await emailTransporter.sendMail({
+    from: `"Habesha POS" <${process.env.EMAIL_USER}>`,
+    to,
+    subject,
+    html,
+  });
+}
+
+async function createOTP(email: string, purpose: "register" | "superadmin", tenantId?: string): Promise<string> {
+  const otp = generateOTP();
+  const expiresAt = new Date(Date.now() + (purpose === "superadmin" ? 10 : 15) * 60 * 1000);
+  await query(
+    `INSERT INTO email_otps (id, email, otp, purpose, tenant_id, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [`OTP-${Date.now()}`, email.toLowerCase(), otp, purpose, tenantId || null, expiresAt.toISOString()]
+  );
+  return otp;
+}
+
+async function verifyOTP(email: string, otp: string, purpose: "register" | "superadmin"): Promise<boolean> {
+  const r = await query(
+    `SELECT id FROM email_otps
+     WHERE LOWER(email)=LOWER($1) AND otp=$2 AND purpose=$3 AND used=FALSE AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [email, otp, purpose]
+  );
+  if (!r.rows.length) return false;
+  await query("UPDATE email_otps SET used=TRUE WHERE id=$1", [r.rows[0].id]);
+  return true;
+}
 
 // ─── Row mappers ──────────────────────────────────────────────────────────────
 
@@ -446,6 +530,70 @@ app.post("/api/register", async (req, res) => {
 
     res.status(201).json({ success: true, code, businessName, plan, businessSize, status: "pending",
       message: `Registration submitted! Your restaurant code is ${code}. Awaiting admin approval.` });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── EMAIL OTP ────────────────────────────────────────────────────────────────
+
+// Send OTP for registration email verification
+app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
+  const { email, businessName } = req.body;
+  if (!email) return res.status(400).json({ error: "Email required" });
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
+    return res.status(503).json({ error: "Email service not configured. Contact admin." });
+  try {
+    const recent = await query(
+      "SELECT COUNT(*) FROM email_otps WHERE LOWER(email)=LOWER($1) AND purpose='register' AND created_at > NOW() - INTERVAL '1 hour'",
+      [email]
+    );
+    if (Number(recent.rows[0].count) >= 3)
+      return res.status(429).json({ error: "Too many requests. Wait 1 hour." });
+    const otp = await createOTP(email, "register");
+    await sendOTPEmail(email, otp, "register", businessName);
+    res.json({ success: true, message: "Verification code sent to " + email });
+  } catch (e: any) {
+    console.error("send-otp error:", e.message);
+    res.status(500).json({ error: "Failed to send email: " + e.message });
+  }
+});
+
+// Verify registration OTP
+app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
+  try {
+    const valid = await verifyOTP(email, otp, "register");
+    if (!valid) return res.status(400).json({ error: "Invalid or expired code. Try again." });
+    res.json({ success: true, verified: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Send OTP for super admin 2FA — key must be correct first
+app.post("/api/admin/send-otp", async (req: Request, res: Response) => {
+  const { key } = req.body;
+  if (!key) return res.status(400).json({ error: "Admin key required" });
+  if (key !== process.env.ADMIN_KEY) return res.status(401).json({ error: "Invalid admin key" });
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
+    return res.status(503).json({ error: "Email service not configured." });
+  try {
+    const otp = await createOTP(SUPER_ADMIN_EMAIL, "superadmin");
+    await sendOTPEmail(SUPER_ADMIN_EMAIL, otp, "superadmin");
+    const masked = SUPER_ADMIN_EMAIL.replace(/(.{2})(.*)(@.*)/, "$1***$3");
+    res.json({ success: true, message: `OTP sent to ${masked}` });
+  } catch (e: any) {
+    console.error("admin-send-otp error:", e.message);
+    res.status(500).json({ error: "Failed to send email: " + e.message });
+  }
+});
+
+// Verify super admin OTP
+app.post("/api/admin/verify-otp", async (req: Request, res: Response) => {
+  const { otp } = req.body;
+  if (!otp) return res.status(400).json({ error: "OTP required" });
+  try {
+    const valid = await verifyOTP(SUPER_ADMIN_EMAIL, otp, "superadmin");
+    if (!valid) return res.status(400).json({ error: "Invalid or expired code." });
+    res.json({ success: true });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

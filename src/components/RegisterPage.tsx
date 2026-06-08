@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Building2, User, Phone, Mail, ArrowLeft, ArrowRight, Check, Globe, Lock, Eye, EyeOff, Coffee, UtensilsCrossed, Hotel } from "lucide-react";
+import { Building2, User, Phone, Mail, ArrowLeft, ArrowRight, Check, Globe, Lock, Eye, EyeOff, Coffee, UtensilsCrossed, Hotel, RefreshCw, ShieldCheck } from "lucide-react";
 
 interface Props {
   isAmharic: boolean;
@@ -8,7 +8,7 @@ interface Props {
 }
 
 type BusinessSize = "small" | "medium" | "large";
-type Step = "size" | "info";
+type Step = "size" | "info" | "verify";
 
 const SIZES: {
   id: BusinessSize;
@@ -111,16 +111,54 @@ export default function RegisterPage({ isAmharic, setIsAmharic, onBack }: Props)
     businessName: "", ownerName: "", phone: "", email: "",
     password: "", confirmPassword: "", plan: "trial",
   });
-  const [showPass, setShowPass]       = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [submitting, setSubmitting]   = useState(false);
-  const [done, setDone]               = useState<{ code: string; name: string } | null>(null);
-  const [error, setError]             = useState("");
+  const [showPass, setShowPass]         = useState(false);
+  const [showConfirm, setShowConfirm]   = useState(false);
+  const [submitting, setSubmitting]     = useState(false);
+  const [done, setDone]                 = useState<{ code: string; name: string } | null>(null);
+  const [error, setError]               = useState("");
+  // Email verification
+  const [otp, setOtp]                   = useState("");
+  const [otpSending, setOtpSending]     = useState(false);
+  const [otpSent, setOtpSent]           = useState(false);
+  const [otpError, setOtpError]         = useState("");
+  const [emailVerified, setEmailVerified] = useState(false);
 
   const tc = (en: string, am: string) => isAmharic ? am : en;
   const set = (k: string, v: string) => setForm(p => ({ ...p, [k]: v }));
 
-  const submit = async () => {
+  const sendOtp = async () => {
+    if (!form.email.trim()) { setOtpError(tc("Enter your email first", "ኢሜልዎን ያስገቡ")); return; }
+    setOtpSending(true); setOtpError("");
+    try {
+      const res = await fetch("/api/auth/send-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: form.email, businessName: form.businessName }),
+      });
+      const data = await res.json();
+      if (res.ok) { setOtpSent(true); setStep("verify"); }
+      else setOtpError(data.error || "Failed to send email");
+    } catch { setOtpError(tc("Network error", "የኔትዎርክ ስህተት")); }
+    finally { setOtpSending(false); }
+  };
+
+  const verifyOtp = async () => {
+    if (otp.length < 6) { setOtpError(tc("Enter the 6-digit code", "6-አሃዝ ኮድ ያስገቡ")); return; }
+    setSubmitting(true); setOtpError("");
+    try {
+      const res = await fetch("/api/auth/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: form.email, otp }),
+      });
+      const data = await res.json();
+      if (res.ok) { setEmailVerified(true); await submit(true); }
+      else setOtpError(data.error || "Invalid code");
+    } catch { setOtpError(tc("Network error", "የኔትዎርክ ስህተት")); }
+    finally { setSubmitting(false); }
+  };
+
+  const submit = async (emailOk = false) => {
     if (!selectedSize) { setError(tc("Please select a business size", "ሥፋት ይምረጡ")); return; }
     if (!form.businessName.trim() || !form.ownerName.trim() || !form.phone.trim() || !form.password.trim()) {
       setError(tc("Please fill all required fields *", "ሁሉንም * ሜዳዎች ይሙሉ")); return;
@@ -131,6 +169,8 @@ export default function RegisterPage({ isAmharic, setIsAmharic, onBack }: Props)
     if (form.password !== form.confirmPassword) {
       setError(tc("Passwords do not match", "የይለፍ ቃሎቹ አይዛመዱም")); return;
     }
+    // If email provided and not yet verified, go to OTP step
+    if (form.email.trim() && !emailOk) { await sendOtp(); return; }
     setSubmitting(true); setError("");
     try {
       const res = await fetch("/api/register", {
@@ -285,6 +325,65 @@ export default function RegisterPage({ isAmharic, setIsAmharic, onBack }: Props)
             🌐 {isAmharic ? "English" : "አማርኛ"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+
+  // ── STEP 2b: Email OTP verification ──────────────────────────────────────────
+  if (step === "verify") return (
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm space-y-5">
+        <div className="text-center">
+          <div className="w-16 h-16 bg-emerald-500/15 border-2 border-emerald-500/40 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <ShieldCheck className="w-8 h-8 text-emerald-400" />
+          </div>
+          <h2 className="text-xl font-black text-slate-100">{tc("Verify Your Email", "ኢሜልዎን ያረጋግጡ")}</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            {tc("We sent a 6-digit code to", "ወደዚህ ኢሜል ኮድ ልከናል")}
+            <span className="text-amber-400 font-bold ml-1">{form.email}</span>
+          </p>
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={otp}
+            onChange={e => { setOtp(e.target.value.replace(/\D/g, "")); setOtpError(""); }}
+            onKeyDown={e => e.key === "Enter" && verifyOtp()}
+            placeholder="000000"
+            className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-4 text-white font-mono text-3xl tracking-[0.6em] text-center placeholder-slate-700 focus:outline-none focus:border-emerald-500/50"
+            autoFocus
+          />
+          {otpError && <p className="text-xs text-rose-400 font-semibold">{otpError}</p>}
+
+          <button
+            onClick={verifyOtp}
+            disabled={submitting || otp.length < 6}
+            className="w-full flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-sm py-3 rounded-xl cursor-pointer transition-all"
+          >
+            {submitting
+              ? <><RefreshCw className="w-4 h-4 animate-spin" /> {tc("Verifying...", "እያረጋገጠ...")}</>
+              : <><Check className="w-4 h-4" /> {tc("Verify & Complete Registration", "አረጋግጥ እና ምዝገባ ጨርስ")}</>
+            }
+          </button>
+        </div>
+
+        <div className="text-center space-y-2">
+          <p className="text-xs text-slate-600">{tc("Didn't receive it?", "አልደረሰዎትም?")}</p>
+          <button
+            onClick={() => { setOtp(""); setOtpError(""); sendOtp(); }}
+            disabled={otpSending}
+            className="text-xs text-amber-500 hover:text-amber-400 underline underline-offset-2 cursor-pointer disabled:opacity-50"
+          >
+            {otpSending ? tc("Sending...", "እየላከ...") : tc("Resend code", "ኮዱን እንደገና ላክ")}
+          </button>
+        </div>
+
+        <button onClick={() => { setStep("info"); setOtp(""); setOtpError(""); }} className="w-full text-xs text-slate-600 hover:text-slate-400 cursor-pointer py-1 text-center">
+          ← {tc("Back", "ተመለስ")}
+        </button>
       </div>
     </div>
   );
