@@ -88,11 +88,16 @@ const PLAN_LIMITS: Record<SubscriptionPlan, { branches: number; staff: number; a
 const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || "ediluadmasu@gmail.com";
 
 const emailTransporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,          // SSL on port 465
   auth: {
     user: process.env.EMAIL_USER || "",
-    pass: process.env.EMAIL_PASS || "", // Gmail App Password (not login password)
+    pass: (process.env.EMAIL_PASS || "").replace(/\s/g, ""), // strip spaces from app password
   },
+  connectionTimeout: 10000,
+  greetingTimeout:   10000,
+  socketTimeout:     15000,
 });
 
 function generateOTP(): string {
@@ -135,12 +140,18 @@ async function sendOTPEmail(to: string, otp: string, purpose: "register" | "supe
     </div>
   `;
 
-  await emailTransporter.sendMail({
-    from: `"Habesha POS" <${process.env.EMAIL_USER}>`,
-    to,
-    subject,
-    html,
-  });
+  // 20-second hard timeout so the request never hangs forever
+  await Promise.race([
+    emailTransporter.sendMail({
+      from: `"Habesha POS" <${process.env.EMAIL_USER}>`,
+      to,
+      subject,
+      html,
+    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Email send timeout after 20s")), 20000)
+    ),
+  ]);
 }
 
 async function createOTP(email: string, purpose: "register" | "superadmin", tenantId?: string): Promise<string> {
