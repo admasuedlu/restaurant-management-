@@ -85,7 +85,7 @@ const PLAN_LIMITS: Record<SubscriptionPlan, { branches: number; staff: number; a
 
 // ─── Email / OTP ─────────────────────────────────────────────────────────────
 
-const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || "ediludadmasu@gmail.com";
+const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || "ediluadmasu@gmail.com";
 
 const emailTransporter = nodemailer.createTransport({
   service: "gmail",
