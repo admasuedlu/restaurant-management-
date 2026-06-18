@@ -933,6 +933,172 @@ app.get("/api/subscription/payment-result", async (req: Request, res: Response) 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── TENANT PAYMENT SETTINGS ──────────────────────────────────────────────────
+
+// GET: load payment settings (owner/manager only)
+app.get("/api/payment-settings", requireAuth, rOwner, async (req: TenantRequest, res) => {
+  try {
+    const r = await query(
+      "SELECT chapa_secret_key, chapa_public_key, payment_enabled FROM settings WHERE tenant_id=$1",
+      [req.tenant!.id]
+    );
+    if (!r.rows.length) return res.json({ paymentEnabled: false, chapaPublicKey: "", hasSecretKey: false, chapaSecretKeyMasked: "" });
+    const row = r.rows[0];
+    const secret: string = row.chapa_secret_key || "";
+    const masked = secret.length > 12
+      ? `${secret.slice(0, 8)}${"*".repeat(secret.length - 12)}${secret.slice(-4)}`
+      : secret.length > 0 ? "****" : "";
+    res.json({
+      paymentEnabled:       row.payment_enabled   || false,
+      chapaPublicKey:       row.chapa_public_key  || "",
+      hasSecretKey:         secret.length > 0,
+      chapaSecretKeyMasked: masked,
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST: save payment settings
+app.post("/api/payment-settings", requireAuth, rOwner, async (req: TenantRequest, res) => {
+  const { paymentEnabled, chapaPublicKey, chapaSecretKey } = req.body;
+  try {
+    const sets: string[] = [];
+    const params: any[]  = [];
+    let idx = 1;
+    if (typeof paymentEnabled === "boolean")                       { sets.push(`payment_enabled=$${idx++}`);   params.push(paymentEnabled); }
+    if (typeof chapaPublicKey === "string")                        { sets.push(`chapa_public_key=$${idx++}`);  params.push(chapaPublicKey.trim()); }
+    if (typeof chapaSecretKey === "string" && chapaSecretKey.trim()) { sets.push(`chapa_secret_key=$${idx++}`); params.push(chapaSecretKey.trim()); }
+    if (sets.length) {
+      params.push(req.tenant!.id);
+      await query(`UPDATE settings SET ${sets.join(", ")} WHERE tenant_id=$${idx}`, params);
+    }
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── CUSTOMER QR SCAN-TO-PAY ──────────────────────────────────────────────────
+
+// Initiate a Chapa payment for a customer's table (uses tenant's own Chapa key)
+app.post("/api/orders/initiate-customer-payment", async (req: Request, res: Response) => {
+  const { tenantCode, tableId, orderIds, amount, customerEmail, customerName, customerPhone } = req.body;
+  if (!tenantCode || !tableId || !amount) {
+    return res.status(400).json({ error: "tenantCode, tableId and amount are required" });
+  }
+  try {
+    const tenant = await getTenant(tenantCode);
+    if (!tenant) return res.status(404).json({ error: "Restaurant not found" });
+
+    const sr = await query(
+      "SELECT chapa_secret_key, payment_enabled FROM settings WHERE tenant_id=$1",
+      [tenant.id]
+    );
+    if (!sr.rows.length || !sr.rows[0].payment_enabled) {
+      return res.status(503).json({ error: "Online payment is not enabled for this restaurant" });
+    }
+    const tenantKey: string = sr.rows[0].chapa_secret_key || "";
+    if (!tenantKey) return res.status(503).json({ error: "Payment not configured for this restaurant. Contact staff." });
+
+    const txRef  = `ORD-${tenant.code}-T${tableId}-${Date.now()}`;
+    const ids    = Array.isArray(orderIds) ? orderIds : [];
+
+    await query(
+      `INSERT INTO order_payments (tx_ref, tenant_id, order_ids, amount, status, table_id, method)
+       VALUES ($1,$2,$3,$4,'pending',$5,'chapa') ON CONFLICT (tx_ref) DO NOTHING`,
+      [txRef, tenant.id, ids, Number(amount), String(tableId)]
+    );
+
+    const chapaRes = await fetch("https://api.chapa.co/v1/transaction/initialize", {
+      method:  "POST",
+      headers: { "Authorization": `Bearer ${tenantKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount:       String(amount),
+        currency:     "ETB",
+        email:        customerEmail || `table${tableId}@${tenant.code.toLowerCase()}.guest`,
+        first_name:   customerName?.split(" ")[0] || "Guest",
+        last_name:    customerName?.split(" ").slice(1).join(" ") || "",
+        phone_number: customerPhone || tenant.phone,
+        tx_ref:       txRef,
+        callback_url: `${config.appUrl}/api/orders/customer-payment-webhook`,
+        return_url:   `${config.appUrl}/pay-done?ref=${txRef}&tenant=${tenantCode}`,
+        "customization[title]":       tenant.businessName,
+        "customization[description]": `Table ${tableId} — ${ids.length} item(s)`,
+      }),
+    });
+
+    const chapaData = await chapaRes.json() as any;
+    if (!chapaRes.ok || chapaData.status !== "success") {
+      console.error("Chapa customer-pay init failed:", chapaData);
+      return res.status(502).json({ error: "Payment gateway error: " + (chapaData.message || "unknown") });
+    }
+    res.json({ checkoutUrl: chapaData.data.checkout_url, txRef });
+  } catch (e: any) {
+    console.error("initiate-customer-payment error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Chapa webhook — called after customer pays their table bill
+app.post("/api/orders/customer-payment-webhook", express.json({ type: "*/*" }), async (req: Request, res: Response) => {
+  res.sendStatus(200); // always ack immediately
+  try {
+    const txRef = req.body?.trx_ref || req.body?.tx_ref;
+    if (!txRef) return;
+
+    const txRow = await query("SELECT * FROM order_payments WHERE tx_ref=$1", [txRef]);
+    if (!txRow.rows.length || txRow.rows[0].status === "completed") return;
+    const tx = txRow.rows[0];
+
+    // Load the tenant's own key to verify
+    const sr = await query("SELECT chapa_secret_key FROM settings WHERE tenant_id=$1", [tx.tenant_id]);
+    const tenantKey: string = sr.rows[0]?.chapa_secret_key || "";
+    if (!tenantKey) return;
+
+    const verRes  = await fetch(`https://api.chapa.co/v1/transaction/verify/${txRef}`, {
+      headers: { "Authorization": `Bearer ${tenantKey}` },
+    });
+    const verData = await verRes.json() as any;
+    if (!verRes.ok || verData.status !== "success") return;
+
+    // Mark transaction and orders as paid
+    await query("UPDATE order_payments SET status='completed', completed_at=NOW() WHERE tx_ref=$1", [txRef]);
+    for (const orderId of (tx.order_ids || [])) {
+      await query(
+        "UPDATE orders SET payment_status='Paid', payment_method='Chapa' WHERE id=$1 AND tenant_id=$2",
+        [orderId, tx.tenant_id]
+      ).catch(() => {});
+    }
+    console.log(`✅ Customer Chapa payment complete: ${txRef} | table: ${tx.table_id}`);
+  } catch (e: any) {
+    console.error("customer-payment-webhook error:", e.message);
+  }
+});
+
+// Poll: check whether a customer's order payment has completed
+app.get("/api/orders/customer-payment-result", async (req: Request, res: Response) => {
+  const txRef = req.query.ref as string;
+  if (!txRef) return res.status(400).json({ error: "ref required" });
+  try {
+    const txRow = await query("SELECT * FROM order_payments WHERE tx_ref=$1", [txRef]);
+    if (!txRow.rows.length) return res.status(404).json({ error: "Transaction not found" });
+    const tx = txRow.rows[0];
+    if (tx.status === "completed") return res.json({ status: "completed", tableId: tx.table_id });
+
+    // Try direct verify
+    const sr = await query("SELECT chapa_secret_key FROM settings WHERE tenant_id=$1", [tx.tenant_id]);
+    const tenantKey: string = sr.rows[0]?.chapa_secret_key || "";
+    if (tenantKey) {
+      const verRes  = await fetch(`https://api.chapa.co/v1/transaction/verify/${txRef}`, {
+        headers: { "Authorization": `Bearer ${tenantKey}` },
+      });
+      const verData = await verRes.json() as any;
+      if (verRes.ok && verData.status === "success") {
+        await query("UPDATE order_payments SET status='completed', completed_at=NOW() WHERE tx_ref=$1", [txRef]);
+        return res.json({ status: "completed", tableId: tx.table_id });
+      }
+    }
+    return res.json({ status: tx.status, tableId: tx.table_id });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/subscription/status", requireAuth, (req: TenantRequest, res) => {
   const { status, trialDaysLeft, daysOverdue, graceEnds } = getSubscriptionStatus(req.tenant!);
   res.json({ status, plan: req.tenant!.plan, trialDaysLeft, daysOverdue, graceEnds,
