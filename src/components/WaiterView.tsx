@@ -10,6 +10,7 @@ interface WaiterViewProps {
   updateOrderStatus: (id: string, status: Order["status"]) => void;
   getElapsedMinutes: (iso: string) => number;
   onRefresh: () => void;
+  assignedTableIds?: string[]; // if set, only show orders for these tables
 }
 
 export default function WaiterView({
@@ -19,17 +20,24 @@ export default function WaiterView({
   updateOrderStatus,
   getElapsedMinutes,
   onRefresh,
+  assignedTableIds,
 }: WaiterViewProps) {
   const [filter, setFilter] = useState<"all" | "ready">("all");
   const [showHistory, setShowHistory] = useState(true);
 
+  // ── Filter orders by assigned tables (if assignments exist) ───────────────
+  const hasAssignments = assignedTableIds && assignedTableIds.length > 0;
+  const myOrders = hasAssignments
+    ? orders.filter(o => assignedTableIds!.includes(o.tableId.toUpperCase()))
+    : orders;
+
   // ── Compute today's stats ──────────────────────────────────────────────────
   const todayStr = new Date().toISOString().slice(0, 10);
-  const todayOrders = orders.filter(
+  const todayOrders = myOrders.filter(
     (o) => o.creationTime && o.creationTime.slice(0, 10) === todayStr
   );
 
-  const active = orders.filter(
+  const active = myOrders.filter(
     (o) => o.status === "Pending" || o.status === "Cooking" || o.status === "Ready"
   );
   const ready   = active.filter((o) => o.status === "Ready");
@@ -82,6 +90,21 @@ export default function WaiterView({
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
+
+      {/* ── Assigned tables badge ─────────────────────────────────────────── */}
+      {hasAssignments && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-2.5 flex items-center gap-2">
+          <span className="text-blue-400 text-sm">🪑</span>
+          <div>
+            <p className="text-[10px] font-mono uppercase tracking-wider text-blue-500">
+              {isAmharic ? "የተሰጡ ጠረጴዛዎች" : "Your assigned tables"}
+            </p>
+            <p className="text-xs font-bold text-blue-300">
+              {assignedTableIds!.join("  ·  ")}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── READY ALERT BANNER ────────────────────────────────────────────── */}
       {ready.length > 0 && (

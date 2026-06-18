@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -21,7 +22,7 @@ export default function ExpenseTracker({ tenantCode, isAmharic }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await fetch("/api/expenses", { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch("/api/expenses");
     if (r.ok) setExpenses(await r.json());
     setLoading(false);
   }, [tenantCode]);
@@ -33,8 +34,8 @@ export default function ExpenseTracker({ tenantCode, isAmharic }: Props) {
     setSaving(true);
     const method = editId ? "PATCH" : "POST";
     const url = editId ? `/api/expenses/${editId}` : "/api/expenses";
-    const r = await fetch(url, {
-      method, headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+    const r = await apiFetch(url, {
+      method, headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...form, amount: Number(form.amount) }),
     });
     if (r.ok) { load(); setShowForm(false); setEditId(null); setForm({ category: "Supplies", description: "", amount: "", date: new Date().toISOString().split("T")[0] }); }
@@ -43,7 +44,7 @@ export default function ExpenseTracker({ tenantCode, isAmharic }: Props) {
 
   const del = async (id: string) => {
     if (!confirm(tc("Delete this expense?","ይህን ወጪ ይሰርዙ?"))) return;
-    await fetch(`/api/expenses/${id}`, { method: "DELETE", headers: { "X-Tenant-Code": tenantCode } });
+    await apiFetch(`/api/expenses/${id}`, { method: "DELETE" });
     load();
   };
 

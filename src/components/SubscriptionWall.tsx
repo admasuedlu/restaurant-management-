@@ -172,7 +172,7 @@ export default function SubscriptionWall({
               <div>
                 <div className="text-xs font-bold text-purple-400">CBE Birr</div>
                 <div className="text-xs text-slate-300 font-mono">1000123456789</div>
-                <div className="text-xs text-slate-500">{tc("Account name: Habesha POS", "የሂሳብ ስም: Habesha POS")}</div>
+                <div className="text-xs text-slate-500">{tc("Account name: Aura Hotel Solutions", "የሂሳብ ስም: Aura Hotel Solutions")}</div>
               </div>
             </div>
 
@@ -270,7 +270,7 @@ export default function SubscriptionWall({
         </button>
 
         <p className="text-center text-xs text-slate-700">
-          {tc("Support: admin@habeshapos.com · +251 911 000 000", "ድጋፍ: admin@habeshapos.com · +251 911 000 000")}
+          {tc("Support: Aurarise Tech Solution PLC · 0996168990", "ድጋፍ: Aurarise Tech Solution PLC · 0996168990")}
         </p>
       </div>
     </div>

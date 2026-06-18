@@ -121,7 +121,7 @@ export interface StaffMember {
   shift: string;
 }
 
-export type BranchId = 'bole' | 'mercato' | 'kazanchis';
+export type BranchId = string;
 
 export interface StaffNotification {
   id: string;
@@ -143,6 +143,12 @@ export interface Branch {
   phone: string;
   capacity: number;
   revenueToday: number;
+}
+
+export interface TableAssignment {
+  tableId: string;
+  staffId: string;
+  staffName: string;
 }
 
 export interface WorkflowSettings {
@@ -175,4 +181,5 @@ export interface AuthUser {
   subscriptionEnd?: string | null;
   monthlyFee?: number;
   businessSize?: BusinessSize;
+  token?: string;
 }

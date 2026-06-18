@@ -1,11 +1,10 @@
 import { Pool, PoolClient } from "pg";
+import { config } from "../config";
 
 // ─── Connection pool ──────────────────────────────────────────────────────────
 
 export const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL ||
-    "postgresql://postgres:123456@localhost:5432/habesha_os",
+  connectionString: config.databaseUrl,
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
@@ -269,7 +268,18 @@ export async function initSchema(): Promise<void> {
         ALTER TABLE settings ADD COLUMN IF NOT EXISTS receipt_footer TEXT DEFAULT 'Thank you for dining with us!';
         ALTER TABLE settings ADD COLUMN IF NOT EXISTS loyalty_points_per_birr NUMERIC DEFAULT 1;
         ALTER TABLE settings ADD COLUMN IF NOT EXISTS loyalty_birr_per_point NUMERIC DEFAULT 0.5;
+        ALTER TABLE settings ADD COLUMN IF NOT EXISTS chapa_secret_key TEXT DEFAULT '';
+        ALTER TABLE settings ADD COLUMN IF NOT EXISTS chapa_public_key TEXT DEFAULT '';
+        ALTER TABLE settings ADD COLUMN IF NOT EXISTS payment_enabled BOOLEAN DEFAULT FALSE;
         ALTER TABLE tenants ADD COLUMN IF NOT EXISTS business_size TEXT DEFAULT 'medium';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS business_type TEXT DEFAULT 'restaurant';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cover_image TEXT DEFAULT '';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS address TEXT DEFAULT '';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Addis Ababa';
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS is_public BOOLEAN DEFAULT TRUE;
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS avg_rating NUMERIC DEFAULT 0;
+        ALTER TABLE tenants ADD COLUMN IF NOT EXISTS opening_hours TEXT DEFAULT '08:00-22:00';
       END $$;
 
       -- Payment logs (created after initial schema, safe to add here)
@@ -310,6 +320,135 @@ export async function initSchema(): Promise<void> {
         completed_at TIMESTAMPTZ
       );
       CREATE INDEX IF NOT EXISTS idx_chapa_tenant ON chapa_transactions(tenant_id);
+
+      -- Table-to-waiter assignments
+      CREATE TABLE IF NOT EXISTS table_assignments (
+        tenant_id  TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        table_id   TEXT NOT NULL,
+        staff_id   TEXT NOT NULL,
+        staff_name TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, table_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_table_assignments_tenant ON table_assignments(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_table_assignments_staff  ON table_assignments(tenant_id, staff_id);
+
+      -- Branch locations (per tenant)
+      CREATE TABLE IF NOT EXISTS branch_locations (
+        id          TEXT NOT NULL,
+        tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        ame_name    TEXT DEFAULT '',
+        location    TEXT DEFAULT '',
+        phone       TEXT DEFAULT '',
+        capacity    INTEGER DEFAULT 20,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (tenant_id, id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_branch_locations_tenant ON branch_locations(tenant_id);
+
+      -- ═══════════════════════════════════════════════════════════════
+      -- HOTEL PROPERTY MANAGEMENT SYSTEM
+      -- ═══════════════════════════════════════════════════════════════
+
+      -- Hotel rooms / beds
+      CREATE TABLE IF NOT EXISTS hotel_rooms (
+        id               TEXT PRIMARY KEY,
+        tenant_id        TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        room_number      TEXT NOT NULL,
+        room_type        TEXT NOT NULL DEFAULT 'standard',
+        floor            INTEGER DEFAULT 1,
+        capacity         INTEGER DEFAULT 2,
+        price_per_night  NUMERIC NOT NULL DEFAULT 0,
+        amenities        TEXT[] DEFAULT '{}',
+        status           TEXT NOT NULL DEFAULT 'available',
+        description      TEXT DEFAULT '',
+        image            TEXT DEFAULT '',
+        UNIQUE(tenant_id, room_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_hotel_rooms_tenant ON hotel_rooms(tenant_id);
+
+      -- Hotel bookings / reservations
+      CREATE TABLE IF NOT EXISTS hotel_bookings (
+        id                TEXT PRIMARY KEY,
+        tenant_id         TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        room_id           TEXT NOT NULL,
+        room_number       TEXT NOT NULL,
+        guest_name        TEXT NOT NULL,
+        guest_phone       TEXT NOT NULL DEFAULT '',
+        guest_id_number   TEXT DEFAULT '',
+        guest_nationality TEXT DEFAULT '',
+        adults            INTEGER DEFAULT 1,
+        children          INTEGER DEFAULT 0,
+        check_in_date     TEXT NOT NULL,
+        check_out_date    TEXT NOT NULL,
+        actual_check_in   TIMESTAMPTZ,
+        actual_check_out  TIMESTAMPTZ,
+        status            TEXT NOT NULL DEFAULT 'reserved',
+        booking_source    TEXT DEFAULT 'walk_in',
+        room_rate         NUMERIC NOT NULL DEFAULT 0,
+        total_nights      INTEGER DEFAULT 1,
+        subtotal          NUMERIC DEFAULT 0,
+        discount          NUMERIC DEFAULT 0,
+        tax               NUMERIC DEFAULT 0,
+        total             NUMERIC DEFAULT 0,
+        advance_paid      NUMERIC DEFAULT 0,
+        balance_due       NUMERIC DEFAULT 0,
+        payment_status    TEXT DEFAULT 'unpaid',
+        payment_method    TEXT DEFAULT '',
+        special_requests  TEXT DEFAULT '',
+        notes             TEXT DEFAULT '',
+        created_at        TIMESTAMPTZ DEFAULT NOW(),
+        created_by        TEXT DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_hotel_bookings_tenant    ON hotel_bookings(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_hotel_bookings_room      ON hotel_bookings(tenant_id, room_id);
+      CREATE INDEX IF NOT EXISTS idx_hotel_bookings_status    ON hotel_bookings(tenant_id, status);
+      CREATE INDEX IF NOT EXISTS idx_hotel_bookings_checkin   ON hotel_bookings(tenant_id, check_in_date);
+
+      -- Room charges (minibar, room service, laundry, etc.)
+      CREATE TABLE IF NOT EXISTS hotel_room_charges (
+        id          TEXT PRIMARY KEY,
+        tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        booking_id  TEXT NOT NULL REFERENCES hotel_bookings(id) ON DELETE CASCADE,
+        room_id     TEXT NOT NULL,
+        room_number TEXT NOT NULL,
+        type        TEXT NOT NULL DEFAULT 'other',
+        description TEXT NOT NULL,
+        amount      NUMERIC NOT NULL DEFAULT 0,
+        quantity    INTEGER DEFAULT 1,
+        date        TIMESTAMPTZ DEFAULT NOW(),
+        added_by    TEXT DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_hotel_charges_booking ON hotel_room_charges(booking_id);
+      CREATE INDEX IF NOT EXISTS idx_hotel_charges_tenant  ON hotel_room_charges(tenant_id);
+
+      -- Housekeeping logs
+      CREATE TABLE IF NOT EXISTS housekeeping_logs (
+        id          TEXT PRIMARY KEY,
+        tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        room_id     TEXT NOT NULL,
+        room_number TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        staff_name  TEXT DEFAULT '',
+        notes       TEXT DEFAULT '',
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_housekeeping_tenant ON housekeeping_logs(tenant_id);
+
+      -- Customer order payments via Chapa (QR scan-to-pay)
+      CREATE TABLE IF NOT EXISTS order_payments (
+        tx_ref       TEXT PRIMARY KEY,
+        tenant_id    TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        order_ids    TEXT[] NOT NULL DEFAULT '{}',
+        amount       NUMERIC NOT NULL DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        method       TEXT DEFAULT 'chapa',
+        table_id     TEXT DEFAULT '',
+        created_at   TIMESTAMPTZ DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_order_payments_tenant ON order_payments(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_order_payments_status ON order_payments(tenant_id, status);
     `);
     console.log("✅ PostgreSQL schema ready");
   } finally {

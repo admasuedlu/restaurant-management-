@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -26,7 +27,7 @@ export default function ReservationManager({ tenantCode, isAmharic }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await fetch(`/api/reservations?date=${date}`, { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch(`/api/reservations?date=${date}`);
     if (r.ok) setReservations(await r.json());
     setLoading(false);
   }, [tenantCode, date]);
@@ -36,19 +37,19 @@ export default function ReservationManager({ tenantCode, isAmharic }: Props) {
   const save = async () => {
     if (!form.customerName || !form.phone || !form.date || !form.time) return;
     setSaving(true);
-    const r = await fetch("/api/reservations", {
+    const r = await apiFetch("/api/reservations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenantCode, ...form, guests: Number(form.guests) }),
+      body: JSON.stringify({ ...form, guests: Number(form.guests) }),
     });
     if (r.ok) { load(); setShowForm(false); setForm({ customerName: "", phone: "", guests: "2", date: new Date().toISOString().split("T")[0], time: "12:00", note: "" }); }
     setSaving(false);
   };
 
   const updateStatus = async (id: string, status: string) => {
-    await fetch(`/api/reservations/${id}`, {
+    await apiFetch(`/api/reservations/${id}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
     load();
@@ -56,7 +57,7 @@ export default function ReservationManager({ tenantCode, isAmharic }: Props) {
 
   const del = async (id: string) => {
     if (!confirm(tc("Cancel this reservation?","ይህን ቦታ ማስያዝ ይሰርዙ?"))) return;
-    await fetch(`/api/reservations/${id}`, { method: "DELETE", headers: { "X-Tenant-Code": tenantCode } });
+    await apiFetch(`/api/reservations/${id}`, { method: "DELETE" });
     load();
   };
 

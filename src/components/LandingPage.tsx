@@ -3,8 +3,11 @@ import {
   ChefHat, Smartphone, BarChart3, Users, ShoppingCart, CreditCard,
   Wifi, WifiOff, Globe, Check, ArrowRight, Star, Zap, Shield,
   Clock, TrendingUp, Layers, Bell, Menu, X, ChevronDown,
-  Utensils, Building2, Volume2, QrCode, Printer, Package,
+  Utensils, Building2, Volume2, QrCode, Printer, Package, MapPin,
 } from "lucide-react";
+import {
+  PLATFORM_NAME, PLATFORM_NAME_AM, FOOTER_CREDIT_EN, FOOTER_CREDIT_AM,
+} from "../lib/branding";
 
 interface Props {
   onLogin: () => void;
@@ -71,11 +74,34 @@ const STEPS = [
   { num: "04", title: "Go Live",       amTitle: "ይጀምሩ",        desc: "Start taking orders. Kitchen and cashier see everything live.", amDesc: "ትዕዛዞች ይጀምሩ። ሁሉም ቀጥታ ያያሉ።",               icon: Zap },
 ];
 
+interface DirectoryBusiness {
+  code: string;
+  businessName: string;
+  phone: string;
+  businessType: string;
+  description: string;
+  coverImage: string;
+  address: string;
+  city: string;
+  avgRating: number;
+  openingHours: string;
+}
+
 export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmharic }: Props) {
   const [menuOpen, setMenuOpen]   = useState(false);
   const [scrolled, setScrolled]   = useState(false);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
+  const [businesses, setBusinesses] = useState<DirectoryBusiness[]>([]);
+  const [dirSearch, setDirSearch]   = useState("");
+  const [dirFilter, setDirFilter]   = useState<"all"|"restaurant"|"hotel"|"hotel_restaurant">("all");
   const heroRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetch("/api/public/directory")
+      .then(r => r.ok ? r.json() : [])
+      .then(setBusinesses)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const h = () => setScrolled(window.scrollY > 40);
@@ -92,7 +118,7 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
 
   const FAQS = [
     { q: t("Do I need a credit card to start?", "ለመጀመር ክሬዲት ካርድ ያስፈልጋል?"), a: t("No! The free trial requires no payment. Just register and start immediately.", "አያስፈልግም! ነፃ ሙከራ ምንም ክፍያ አያስፈልግም። ይመዝገቡ እና ወዲያው ይጀምሩ።") },
-    { q: t("Can I use it on a tablet or phone?", "ታብሌት ወይም ስልክ ላይ መጠቀም ይቻላል?"), a: t("Yes. Habesha OS runs on any browser — phone, tablet, or PC. No app install needed.", "አዎ። Habesha OS በማናቸውም ብሮውዘር ይሰራል — ስልክ፣ ታብሌት ወይም ኮምፒውተር።") },
+    { q: t("Can I use it on a tablet or phone?", "ታብሌት ወይም ስልክ ላይ መጠቀም ይቻላል?"), a: t(`Yes. ${PLATFORM_NAME} runs on any browser — phone, tablet, or PC. No app install needed.`, `አዎ። ${PLATFORM_NAME_AM} በማናቸውም ብሮውዘር ይሰራል — ስልክ፣ ታብሌት ወይም ኮምፒውተር።`) },
     { q: t("What happens if the internet goes down?", "ኢንተርኔት ቢቋረጥ ምን ይሆናል?"), a: t("Orders are saved offline and sync automatically when the connection returns.", "ትዕዛዞች ሳይቀሩ ይቀመጣሉ። ኔት ሲመለስ ወዲያው ይሰብሰባሉ።") },
     { q: t("Can staff use it without seeing owner data?", "ሠራተኞች የባለቤቱን ዳታ ሳያዩ መጠቀም ይችላሉ?"), a: t("Yes. Each role (waiter, kitchen, cashier) only sees what they need. Owner controls everything.", "አዎ። እያንዳንዱ ሚና የሚፈልጉትን ብቻ ያያሉ። ባለቤቱ ሁሉን ይቆጣጠሩ።") },
     { q: t("Is the voice announcement in Amharic?", "ድምጽ ማሳወቂያ በአማርኛ ነው?"), a: t("Yes! The kitchen display announces new orders in Amharic every 5 seconds until the chef starts cooking.", "አዎ! ወጥ ቤት ትዕዛዞችን በአማርኛ ሼፉ እስኪጀምር ድረስ በ5 ሰከንድ ይናገራሉ።") },
@@ -107,9 +133,9 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
           {/* Logo */}
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-amber-500 to-rose-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
-              <span className="text-sm font-black text-slate-900">H</span>
+              <span className="text-sm font-black text-slate-900">A</span>
             </div>
-            <span className="font-black text-sm text-slate-100">Habesha OS</span>
+            <span className="font-black text-sm text-slate-100">{t(PLATFORM_NAME, PLATFORM_NAME_AM)}</span>
           </div>
 
           {/* Desktop nav */}
@@ -117,6 +143,7 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
             <button onClick={() => scrollTo("features")} className="hover:text-amber-400 transition-colors cursor-pointer">{t("Features", "ባህሪያት")}</button>
             <button onClick={() => scrollTo("how")} className="hover:text-amber-400 transition-colors cursor-pointer">{t("How it works", "እንዴት ይሰራል")}</button>
             <button onClick={() => scrollTo("pricing")} className="hover:text-amber-400 transition-colors cursor-pointer">{t("Pricing", "ዋጋ")}</button>
+            <button onClick={() => scrollTo("directory")} className="hover:text-amber-400 transition-colors cursor-pointer font-bold text-amber-500/80">{t("Explore", "ያስሱ")}</button>
             <button onClick={() => scrollTo("faq")} className="hover:text-amber-400 transition-colors cursor-pointer">FAQ</button>
           </div>
 
@@ -174,11 +201,11 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
           <div className="space-y-4">
             <h1 className="text-4xl sm:text-5xl md:text-6xl font-black leading-tight">
               <span className="bg-gradient-to-r from-amber-200 via-amber-400 to-rose-400 bg-clip-text text-transparent">
-                {t("The Restaurant OS", "ለሬስቶራንት")}
+                {t(PLATFORM_NAME, PLATFORM_NAME_AM)}
               </span>
               <br />
               <span className="text-slate-100">
-                {t("Built for Ethiopia", "የተሰራ OS")}
+                {t("Hotels & Restaurants", "ሆቴሎች እና ሬስቶራንቶች")}
               </span>
             </h1>
             <p className="text-lg sm:text-xl text-slate-400 max-w-2xl mx-auto leading-relaxed">
@@ -389,6 +416,126 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
         </div>
       </section>
 
+      {/* ── DIRECTORY ────────────────────────────────────────────────────────── */}
+      <section id="directory" className="py-20 px-4 bg-slate-900/40">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-10">
+            <p className="text-xs font-black text-amber-400 uppercase tracking-widest mb-3">
+              {t("EXPLORE", "ያስሱ")}
+            </p>
+            <h2 className="text-3xl font-black">
+              {t("Restaurants & Hotels Near You", "አቅራቢያዎ ምግብ ቤቶች እና ሆቴሎች")}
+            </h2>
+            <p className="text-slate-500 text-sm mt-2 max-w-md mx-auto">
+              {t("Browse menus, view rooms, and make reservations directly.", "ሜኑ ያስሱ፣ ክፍሎች ይመልከቱ እና ቦታ ያዙ።")}
+            </p>
+          </div>
+
+          {/* Search + filter */}
+          <div className="flex flex-col sm:flex-row gap-3 mb-8">
+            <input
+              value={dirSearch}
+              onChange={e => setDirSearch(e.target.value)}
+              placeholder={t("Search by name or city…", "በስም ወይም ከተማ ይፈልጉ…")}
+              className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-500/50 rounded-xl px-4 py-3 text-sm text-slate-200 outline-none placeholder-slate-600"
+            />
+            <div className="flex gap-2">
+              {(["all","restaurant","hotel","hotel_restaurant"] as const).map(f => (
+                <button key={f} onClick={() => setDirFilter(f)}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all ${
+                    dirFilter === f
+                      ? "bg-amber-500 border-amber-500 text-slate-950"
+                      : "bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500"
+                  }`}>
+                  {f === "all" ? t("All","ሁሉ") : f === "restaurant" ? "🍽 Restaurant" : f === "hotel" ? "🏨 Hotel" : "🍽🏨 Both"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Business grid */}
+          {businesses.length === 0 ? (
+            <div className="text-center py-16 text-slate-600">
+              <p className="text-4xl mb-3">🏙</p>
+              <p className="font-bold">{t("Be the first to list your business here!", "ይህን ቦታ ለመጀመሪያ ዝርዝርዎ ይሁኑ!")}</p>
+              <button onClick={onRegister} className="mt-4 px-6 py-3 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl font-black text-sm transition-all">
+                {t("Register Your Business →","ድርጅትዎን ይመዝገቡ →")}
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {businesses
+                .filter(b => {
+                  const q = dirSearch.toLowerCase();
+                  const matchSearch = !q || b.businessName.toLowerCase().includes(q) || b.city.toLowerCase().includes(q) || b.address.toLowerCase().includes(q);
+                  const matchFilter = dirFilter === "all" || b.businessType === dirFilter;
+                  return matchSearch && matchFilter;
+                })
+                .map(b => (
+                  <a
+                    key={b.code}
+                    href={`/place/${b.code}`}
+                    onClick={e => { e.preventDefault(); window.history.pushState({}, "", `/place/${b.code}`); window.dispatchEvent(new PopStateEvent("popstate")); }}
+                    className="group bg-slate-900 border border-slate-800 hover:border-amber-500/40 rounded-2xl overflow-hidden cursor-pointer transition-all hover:shadow-xl hover:shadow-amber-500/5 hover:-translate-y-0.5"
+                  >
+                    {/* Cover */}
+                    <div className={`h-36 relative overflow-hidden ${b.coverImage ? "" : "bg-gradient-to-br from-amber-900/30 via-slate-900 to-slate-800"}`}>
+                      {b.coverImage && <img src={b.coverImage} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />}
+                      <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 to-transparent" />
+                      <span className={`absolute top-3 right-3 text-[10px] font-black px-2.5 py-1 rounded-full border ${
+                        b.businessType === "hotel" ? "bg-purple-500/20 border-purple-500/40 text-purple-300" :
+                        b.businessType === "hotel_restaurant" ? "bg-blue-500/20 border-blue-500/40 text-blue-300" :
+                        "bg-amber-500/20 border-amber-500/40 text-amber-300"
+                      }`}>
+                        {b.businessType === "hotel" ? "🏨 Hotel" : b.businessType === "hotel_restaurant" ? "🍽🏨 Both" : "🍽 Restaurant"}
+                      </span>
+                      {b.avgRating > 0 && (
+                        <div className="absolute bottom-3 right-3 flex items-center gap-1 bg-slate-950/80 backdrop-blur px-2 py-0.5 rounded-lg">
+                          <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                          <span className="text-xs font-black text-amber-400">{b.avgRating.toFixed(1)}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Info */}
+                    <div className="p-4 space-y-2">
+                      <h3 className="font-black text-slate-100 group-hover:text-amber-400 transition-colors">{b.businessName}</h3>
+                      {b.address && (
+                        <p className="text-xs text-slate-500 flex items-center gap-1">
+                          <MapPin className="w-3 h-3 shrink-0" /> {b.address}{b.city ? `, ${b.city}` : ""}
+                        </p>
+                      )}
+                      {b.description && (
+                        <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">{b.description}</p>
+                      )}
+                      <div className="flex items-center justify-between pt-1">
+                        {b.openingHours && (
+                          <span className="text-[10px] text-slate-600 flex items-center gap-1">
+                            <Clock className="w-3 h-3" /> {b.openingHours}
+                          </span>
+                        )}
+                        <span className="text-xs font-bold text-amber-400 group-hover:gap-2 flex items-center gap-1 transition-all">
+                          {t("View","ይመልከቱ")} <ArrowRight className="w-3.5 h-3.5" />
+                        </span>
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              {businesses.filter(b => {
+                const q = dirSearch.toLowerCase();
+                const matchSearch = !q || b.businessName.toLowerCase().includes(q) || b.city.toLowerCase().includes(q);
+                const matchFilter = dirFilter === "all" || b.businessType === dirFilter;
+                return matchSearch && matchFilter;
+              }).length === 0 && (
+                <div className="col-span-3 text-center py-10 text-slate-600">
+                  <p>{t("No results found for your search.","ምንም ውጤት አልተገኘም።")}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* ── FAQ ─────────────────────────────────────────────────────────────── */}
       <section id="faq" className="py-24 px-4">
         <div className="max-w-2xl mx-auto">
@@ -427,7 +574,7 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
             {t("Ready to modernize your restaurant?", "ሬስቶራንትዎን ዘመናዊ ለማድረግ ዝግጁ ናቸው?")}
           </h2>
           <p className="text-slate-400 text-lg">
-            {t("Join restaurants already running on Habesha OS. Start your free 14-day trial today.", "ቀድሞ Habesha OS ሲጠቀሙ ካሉ ሬስቶራንቶች ጋር ይቀላቀሉ። ዛሬ ነፃ ሙከራ ይጀምሩ።")}
+            {t(`Join hotels and restaurants already running on ${PLATFORM_NAME}. Start your free 14-day trial today.`, `ቀድሞ ${PLATFORM_NAME_AM} ሲጠቀሙ ካሉ ተቋማት ጋር ይቀላቀሉ። ዛሬ ነፃ ሙከራ ይጀምሩ።`)}
           </p>
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <button
@@ -453,11 +600,11 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
           <div className="flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-amber-500 to-rose-600 flex items-center justify-center">
-                <span className="text-xs font-black text-slate-900">H</span>
+                <span className="text-xs font-black text-slate-900">A</span>
               </div>
               <div>
-                <p className="text-sm font-black text-slate-200">Habesha Restaurant OS</p>
-                <p className="text-[10px] text-slate-600">{t("Cloud restaurant management for Ethiopia", "ለኢትዮጵያ ሬስቶራንቶች የደመና ስርዓት")}</p>
+                <p className="text-sm font-black text-slate-200">{t(PLATFORM_NAME, PLATFORM_NAME_AM)}</p>
+                <p className="text-[10px] text-slate-600">{t("Cloud hotel & restaurant management", "የደመና ሆቴል እና ሬስቶራንት ስርዓት")}</p>
               </div>
             </div>
 
@@ -469,8 +616,10 @@ export default function LandingPage({ onLogin, onRegister, isAmharic, setIsAmhar
               <button onClick={onRegister} className="text-amber-500 hover:text-amber-400 font-bold cursor-pointer transition-colors">{t("Register","ይመዝገቡ")}</button>
             </div>
 
-            <p className="text-[10px] text-slate-700">
-              © {new Date().getFullYear()} Habesha OS · {t("Made in Ethiopia","በኢትዮጵያ የተሰራ")} 🇪🇹
+            <p className="text-[10px] text-slate-500 text-center">
+              © {new Date().getFullYear()} {t(PLATFORM_NAME, PLATFORM_NAME_AM)}
+              <br />
+              {t(FOOTER_CREDIT_EN, FOOTER_CREDIT_AM)}
             </p>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -16,7 +17,6 @@ interface CostBreakdown {
 
 export default function RecipeManager({ tenantCode, isAmharic }: Props) {
   const tc = (en: string, am: string) => isAmharic ? am : en;
-  const H = { "X-Tenant-Code": tenantCode };
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -35,9 +35,9 @@ export default function RecipeManager({ tenantCode, isAmharic }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     const [mRes, iRes, rRes] = await Promise.all([
-      fetch("/api/menu", { headers: H }),
-      fetch("/api/inventory", { headers: H }),
-      fetch("/api/recipes", { headers: H }),
+      apiFetch("/api/menu"),
+      apiFetch("/api/inventory"),
+      apiFetch("/api/recipes"),
     ]);
     if (mRes.ok) setMenu(await mRes.json());
     if (iRes.ok) setInventory(await iRes.json());
@@ -49,7 +49,7 @@ export default function RecipeManager({ tenantCode, isAmharic }: Props) {
 
   const loadCost = useCallback(async (menuItemId: string) => {
     if (!menuItemId) return;
-    const r = await fetch(`/api/recipes/cost/${menuItemId}`, { headers: H });
+    const r = await apiFetch(`/api/recipes/cost/${menuItemId}`);
     if (r.ok) setCostBreakdown(await r.json());
     else setCostBreakdown(null);
   }, [tenantCode]);
@@ -62,9 +62,9 @@ export default function RecipeManager({ tenantCode, isAmharic }: Props) {
   const addIngredient = async () => {
     if (!selectedMenu || !addInvId || !addQty) return;
     setSaving(true);
-    const r = await fetch("/api/recipes", {
+    const r = await apiFetch("/api/recipes", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...H },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ menuItemId: selectedMenu, inventoryId: addInvId, qtyPerServe: Number(addQty) }),
     });
     if (r.ok) { await load(); await loadCost(selectedMenu); setAddInvId(""); setAddQty(""); }
@@ -72,7 +72,7 @@ export default function RecipeManager({ tenantCode, isAmharic }: Props) {
   };
 
   const removeIngredient = async (recipeId: string) => {
-    await fetch(`/api/recipes/${recipeId}`, { method: "DELETE", headers: H });
+    await apiFetch(`/api/recipes/${recipeId}`, { method: "DELETE" });
     await load();
     if (selectedMenu) await loadCost(selectedMenu);
   };
@@ -233,9 +233,9 @@ export default function RecipeManager({ tenantCode, isAmharic }: Props) {
                         onClick={async () => {
                           if (!qForm.name) return;
                           setQSaving(true);
-                          const r = await fetch("/api/inventory", {
+                          const r = await apiFetch("/api/inventory", {
                             method: "POST",
-                            headers: { "Content-Type": "application/json", ...H },
+                            headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({
                               name: qForm.name, ameName: qForm.name,
                               stock: Number(qForm.stock) || 0,

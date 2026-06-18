@@ -7,13 +7,15 @@ import {
   UserPlus, Pencil, Trash2, Eye, EyeOff, X, Check,
   ChefHat, Users, CreditCard, Wine, TrendingUp, Crown, ShoppingCart, Shield,
 } from "lucide-react";
-import { AuthUser, StaffMember } from "../types";
+import { AuthUser, Branch, StaffMember } from "../types";
+import { apiFetch } from "../lib/api";
 
 interface Props {
   staffList: StaffMember[];
   isAmharic: boolean;
   authUser: AuthUser;
   tenantCode?: string;
+  branches?: Branch[];
   onStaffChange: () => void;        // re-fetch staff after any mutation
 }
 
@@ -50,9 +52,9 @@ const ROLE_COLOR: Record<string, string> = {
   superadmin: "text-slate-300 bg-slate-500/10 border-slate-500/20",
 };
 
-const BLANK = { name: "", role: "waiter" as Role, pin: "", pin2: "" };
+const BLANK = { name: "", role: "waiter" as Role, pin: "", pin2: "", branch: "main" };
 
-export default function StaffManager({ staffList, isAmharic, authUser, tenantCode, onStaffChange }: Props) {
+export default function StaffManager({ staffList, isAmharic, authUser, tenantCode, branches = [], onStaffChange }: Props) {
   const [showForm, setShowForm]       = useState(false);
   const [editId, setEditId]           = useState<string | null>(null);
   const [form, setForm]               = useState({ ...BLANK });
@@ -67,7 +69,6 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
 
   const headers = (extra: Record<string, string> = {}) => ({
     "Content-Type": "application/json",
-    "X-Tenant-Code": tc,
     ...extra,
   });
 
@@ -86,7 +87,13 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
 
   const openEdit = (s: StaffMember) => {
     setEditId(s.id);
-    setForm({ name: s.name, role: (s.role.toLowerCase() as Role), pin: "", pin2: "" });
+    setForm({
+      name: s.name,
+      role: (s.role.toLowerCase() as Role),
+      pin: "",
+      pin2: "",
+      branch: (s as StaffMember & { branch?: string }).branch || "main",
+    });
     setShowPin(false);
     setError("");
     setShowForm(true);
@@ -116,12 +123,16 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
     if (err) { flash(err, true); return; }
     setSaving(true);
     try {
-      const body: Record<string, string> = { name: form.name.trim(), role: form.role };
+      const body: Record<string, string> = {
+        name: form.name.trim(),
+        role: form.role,
+        branch: form.branch || "main",
+      };
       if (form.pin) body.pin = form.pin;
 
       const url    = editId ? `/api/staff/${editId}` : "/api/staff";
       const method = editId ? "PATCH" : "POST";
-      const res    = await fetch(url, { method, headers: headers(), body: JSON.stringify(body) });
+      const res    = await apiFetch(url, { method, headers: headers(), body: JSON.stringify(body) });
       const data   = await res.json();
       if (!res.ok) { flash(data.error || "Error", true); return; }
 
@@ -143,7 +154,7 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
     if (!confirm(isAmharic ? `${name}ን ይሰርዙ?` : `Delete ${name}? This cannot be undone.`)) return;
     setDeletingId(id);
     try {
-      const res = await fetch(`/api/staff/${id}`, { method: "DELETE", headers: headers() });
+      const res = await apiFetch(`/api/staff/${id}`, { method: "DELETE", headers: headers() });
       if (res.ok) {
         flash(isAmharic ? "ሰራተኛ ተሰርዟል" : "Staff member removed");
         onStaffChange();
@@ -225,6 +236,12 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
                         ? ROLES.find((r) => r.value === roleLower)?.amLabel ?? s.role
                         : s.role}
                     </span>
+                    {(s as StaffMember & { branch?: string }).branch && (
+                      <span className="text-[10px] text-slate-500 ml-1">
+                        · {branches.find(b => b.id === (s as StaffMember & { branch?: string }).branch)?.name
+                          ?? (s as StaffMember & { branch?: string }).branch}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -314,6 +331,26 @@ export default function StaffManager({ staffList, isAmharic, authUser, tenantCod
                   ))}
                 </div>
               </div>
+
+              {/* Branch */}
+              {branches.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-1.5">
+                    {isAmharic ? "ቅርንጫፍ" : "Branch"} *
+                  </label>
+                  <select
+                    value={form.branch}
+                    onChange={(e) => setForm({ ...form, branch: e.target.value })}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-amber-500/50"
+                  >
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {isAmharic ? b.ameName : b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* PIN */}
               <div>

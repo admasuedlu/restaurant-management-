@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props {
   tenantCode: string;
@@ -46,8 +47,8 @@ export default function SalesDashboard({ tenantCode, isAmharic }: Props) {
     setLoading(true);
     try {
       const [sRes, cRes] = await Promise.all([
-        fetch(`/api/analytics/sales?period=${period}`, { headers: { "X-Tenant-Code": tenantCode } }),
-        fetch(`/api/analytics/compare`, { headers: { "X-Tenant-Code": tenantCode } }),
+        apiFetch(`/api/analytics/sales?period=${period}`),
+        apiFetch(`/api/analytics/compare`),
       ]);
       if (sRes.ok) setData(await sRes.json());
       if (cRes.ok) setCompare(await cRes.json());

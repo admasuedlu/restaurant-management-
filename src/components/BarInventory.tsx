@@ -3,6 +3,7 @@ import {
   Plus, RefreshCw, AlertTriangle, Package, TrendingDown,
   Edit3, Check, X, Wine,
 } from "lucide-react";
+import { apiFetch } from "../lib/api";
 
 interface InventoryItem {
   id: string;
@@ -39,12 +40,6 @@ export default function BarInventory({ tenantCode, isAmharic, readOnly = false }
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState("");
 
-  const apiFetch = useCallback((url: string, init: RequestInit = {}) => {
-    const h = new Headers(init.headers as HeadersInit);
-    h.set("X-Tenant-Code", tenantCode);
-    return fetch(url, { ...init, headers: h });
-  }, [tenantCode]);
-
   const loadItems = useCallback(async () => {
     setLoading(true); setError("");
     try {
@@ -54,7 +49,7 @@ export default function BarInventory({ tenantCode, isAmharic, readOnly = false }
       setItems(data);
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, [apiFetch]);
+  }, []);
 
   useEffect(() => { loadItems(); }, [loadItems]);
 

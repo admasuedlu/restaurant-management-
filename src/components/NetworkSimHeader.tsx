@@ -53,12 +53,12 @@ export default function NetworkSimHeader({
         {/* Logo & Brand */}
         <div className="flex items-center gap-3">
           <div className="bg-gradient-to-tr from-amber-500 to-rose-600 p-2.5 rounded-xl text-slate-900 font-black shadow-lg shadow-orange-500/20">
-            <span className="text-xl tracking-tight">G</span>
+            <span className="text-xl tracking-tight">A</span>
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-amber-200 to-amber-400 bg-clip-text text-transparent">
-                {isAmharic ? "ጋስትሮ ኦኤስ" : "GastroOS"}
+                {isAmharic ? "ኦራ ሆቴል ሶሉሽንስ" : "Aura Hotel Solutions"}
               </h1>
               <span className="text-[10px] uppercase tracking-widest font-mono bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
                 v2.1 Unified

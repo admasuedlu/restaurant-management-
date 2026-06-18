@@ -2,6 +2,7 @@ import React from "react";
 import { Globe, LogOut, ChefHat, ShoppingCart, CreditCard, TrendingUp, Users, Wine } from "lucide-react";
 import { AuthUser } from "../types";
 import { roleLabel } from "../lib/labels";
+import { PLATFORM_NAME, PLATFORM_NAME_AM } from "../lib/branding";
 
 interface AppHeaderProps {
   isAmharic: boolean;
@@ -39,14 +40,14 @@ export default function AppHeader({
       <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="bg-gradient-to-tr from-amber-500 to-rose-600 p-2 rounded-xl text-slate-900 font-black shrink-0">
-            <span className="text-lg">G</span>
+            <span className="text-lg">A</span>
           </div>
           <div className="min-w-0">
             <h1 className="text-lg font-bold text-amber-200 truncate">
-              {isAmharic ? "ጋስትሮ ኦኤስ" : "GastroOS"}
+              {isAmharic ? PLATFORM_NAME_AM : PLATFORM_NAME}
             </h1>
             <p className="text-[11px] text-slate-500 truncate">
-              {isAmharic ? "የሬስቶራንት ትዕዛዝ ስርዓት" : "Restaurant ordering system"}
+              {isAmharic ? "የሆቴል እና ሬስቶራንት ስርዓት" : "Hotel & restaurant management"}
             </p>
           </div>
         </div>

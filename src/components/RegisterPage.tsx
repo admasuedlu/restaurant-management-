@@ -425,7 +425,7 @@ export default function RegisterPage({ isAmharic, setIsAmharic, onBack }: Props)
               {tc("Restaurant Name *", "የሬስቶራንት ስም *")}
             </label>
             <input type="text" value={form.businessName} onChange={e => set("businessName", e.target.value)}
-              placeholder={tc("e.g. Habesha Restaurant", "ሀበሻ ሬስቶራንት")}
+              placeholder={tc("e.g. Aura Grand Hotel", "ኦራ ግራንድ ሆቴል")}
               className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500/50" />
           </div>
 

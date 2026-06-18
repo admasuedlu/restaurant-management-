@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -30,7 +31,7 @@ export default function LoyaltyManager({ tenantCode, isAmharic }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await fetch("/api/loyalty", { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch("/api/loyalty");
     if (r.ok) setCustomers(await r.json());
     setLoading(false);
   }, [tenantCode]);
@@ -40,9 +41,9 @@ export default function LoyaltyManager({ tenantCode, isAmharic }: Props) {
   const register = async () => {
     if (!regForm.customerName || !regForm.phone) return;
     setSaving(true);
-    const r = await fetch("/api/loyalty/register", {
+    const r = await apiFetch("/api/loyalty/register", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(regForm),
     });
     const d = await r.json();
@@ -54,16 +55,16 @@ export default function LoyaltyManager({ tenantCode, isAmharic }: Props) {
 
   const lookup = async () => {
     if (!redeemPhone) return;
-    const r = await fetch(`/api/loyalty?phone=${redeemPhone}`, { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch(`/api/loyalty?phone=${redeemPhone}`);
     if (r.ok) { const d = await r.json(); setLookupCustomer(d); if (!d) setMsg({ type:"error", text: tc("Customer not found","ደንበኛ አልተገኘም") }); }
   };
 
   const redeem = async () => {
     if (!redeemPhone || !redeemPoints || !lookupCustomer) return;
     setSaving(true);
-    const r = await fetch("/api/loyalty/redeem", {
+    const r = await apiFetch("/api/loyalty/redeem", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone: redeemPhone, points: Number(redeemPoints) }),
     });
     const d = await r.json();

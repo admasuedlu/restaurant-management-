@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -21,7 +22,7 @@ export default function SupplierManager({ tenantCode, isAmharic }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await fetch("/api/suppliers", { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch("/api/suppliers");
     if (r.ok) setSuppliers(await r.json());
     setLoading(false);
   }, [tenantCode]);
@@ -33,8 +34,8 @@ export default function SupplierManager({ tenantCode, isAmharic }: Props) {
     setSaving(true);
     const method = editId ? "PATCH" : "POST";
     const url = editId ? `/api/suppliers/${editId}` : "/api/suppliers";
-    const r = await fetch(url, {
-      method, headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+    const r = await apiFetch(url, {
+      method, headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
     if (r.ok) { load(); setShowForm(false); setEditId(null); setForm({ name:"", phone:"", email:"", address:"", category:"General", note:"" }); }
@@ -43,7 +44,7 @@ export default function SupplierManager({ tenantCode, isAmharic }: Props) {
 
   const del = async (id: string) => {
     if (!confirm(tc("Delete this supplier?","ይህን አቅራቢ ይሰርዙ?"))) return;
-    await fetch(`/api/suppliers/${id}`, { method: "DELETE", headers: { "X-Tenant-Code": tenantCode } });
+    await apiFetch(`/api/suppliers/${id}`, { method: "DELETE" });
     load();
   };
 

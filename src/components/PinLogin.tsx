@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from "react";
 import {
   Delete, Globe, Building2, ArrowRight, Shield,
-  Eye, EyeOff, Phone, Lock, Users, ChefHat, CreditCard,
+  Eye, EyeOff, Phone, Lock, Mail, Users, ChefHat, CreditCard,
   Wine, BarChart3, ArrowLeft,
 } from "lucide-react";
 import { AuthUser } from "../types";
+import { PLATFORM_NAME, PLATFORM_NAME_AM } from "../lib/branding";
 
 interface PinLoginProps {
   onAuth: (user: AuthUser) => void;
@@ -57,14 +58,12 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
   const [staffLoading, setStaffLoading] = useState(false);
 
   // Super admin state
-  const [showAdmin, setShowAdmin]   = useState(false);
-  const [adminKey, setAdminKey]     = useState("");
-  const [showAdminKey, setShowAdminKey] = useState(false);
-  const [adminError, setAdminError] = useState("");
+  const [showAdmin, setShowAdmin]       = useState(false);
+  const [adminEmail, setAdminEmail]     = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [showAdminPass, setShowAdminPass] = useState(false);
+  const [adminError, setAdminError]     = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
-  const [adminStep, setAdminStep]   = useState<"key" | "otp">("key");
-  const [adminOtp, setAdminOtp]     = useState("");
-  const [adminOtpMsg, setAdminOtpMsg] = useState("");
 
   // Secret tap counter — triple-tap logo to reveal owner/admin access
   const [logoTaps, setLogoTaps]     = useState(0);
@@ -160,43 +159,26 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
 
   const handleDelete = () => { if (!staffLoading && !pinError) setPin(p => p.slice(0, -1)); };
 
-  // Step 1: verify key → send OTP
-  const handleAdminKeySubmit = async () => {
-    if (!adminKey.trim()) { setAdminError("Enter the admin key"); return; }
-    setAdminLoading(true); setAdminError("");
-    try {
-      const res = await fetch("/api/admin/send-otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: adminKey }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setAdminStep("otp");
-        setAdminOtpMsg(data.message || "OTP sent to your email");
-      } else {
-        setAdminError(data.error || "Invalid admin key");
-      }
-    } catch { setAdminError("Network error"); }
-    finally { setAdminLoading(false); }
-  };
-
-  // Step 2: verify OTP → get session token → grant access
-  const handleAdminOtpSubmit = async () => {
-    if (!adminOtp.trim()) { setAdminError("Enter the OTP code"); return; }
+  const handleAdminLogin = async () => {
+    if (!adminEmail.trim() || !adminPassword.trim()) {
+      setAdminError(tc("Email and password are required", "ኢሜይል እና የይለፍ ቃል ያስፈልጋሉ"));
+      return;
+    }
     setAdminLoading(true); setAdminError("");
     try {
       const res = await fetch("/api/admin/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ otp: adminOtp }),
+        body: JSON.stringify({ email: adminEmail.trim(), password: adminPassword }),
       });
       const data = await res.json();
       if (res.ok) {
         sessionStorage.setItem("admin_token", data.token);
         onSuperAdmin();
-      } else setAdminError(data.error || "Invalid code");
-    } catch { setAdminError("Network error"); }
+      } else {
+        setAdminError(data.error || tc("Invalid email or password", "ኢሜይል ወይም የይለፍ ቃል ትክክል አይደለም"));
+      }
+    } catch { setAdminError(tc("Network error", "የኔትዎርክ ስህተት")); }
     finally { setAdminLoading(false); }
   };
 
@@ -230,6 +212,13 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
     return () => window.removeEventListener("keydown", h);
   }, [phone, password, screen]);
 
+  useEffect(() => {
+    if (!showAdmin) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Enter") handleAdminLogin(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [showAdmin, adminEmail, adminPassword]);
+
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
       <div className="absolute top-1/4 left-1/4 w-80 h-80 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
@@ -243,88 +232,83 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
             onClick={handleLogoTap}
             className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-tr from-amber-500 to-rose-600 rounded-2xl shadow-2xl shadow-amber-500/30 mb-4 cursor-pointer select-none"
           >
-            <span className="text-2xl font-black text-slate-900">H</span>
+            <span className="text-2xl font-black text-slate-900">A</span>
           </div>
           <h1 className="text-2xl font-bold bg-gradient-to-r from-amber-200 to-amber-400 bg-clip-text text-transparent">
-            {tc("Habesha Restaurant OS", "ሀበሻ ሬስቶራንት OS")}
+            {tc(PLATFORM_NAME, PLATFORM_NAME_AM)}
           </h1>
           <p className="text-[11px] text-slate-500 mt-1">
-            {tc("Cloud-based restaurant management", "የደመና ሬስቶራንት ስርዓት")}
+            {tc("Cloud-based hotel & restaurant management", "የደመና ሆቴል እና ሬስቶራንት ስርዓት")}
           </p>
         </div>
 
         {/* ── SUPER ADMIN OVERLAY ── */}
         {showAdmin ? (
           <div className="space-y-4">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
               <div className="flex items-center gap-2 mb-1">
                 <Shield className="w-4 h-4 text-amber-500" />
-                <span className="text-sm font-bold text-slate-200">Super Admin Access</span>
+                <span className="text-sm font-bold text-slate-200">{tc("Super Admin Access", "የሱፐር አድሚን መግቢያ")}</span>
               </div>
-              <p className="text-[10px] text-slate-500 mb-4">
-                {adminStep === "key" ? "Step 1 of 2 — Enter admin key" : "Step 2 of 2 — Enter OTP sent to your email"}
+              <p className="text-[10px] text-slate-500">
+                {tc("Email & password", "ኢሜይል እና የይለፍ ቃል")}
               </p>
 
-              {adminStep === "key" ? (
-                <>
-                  <div className="relative">
-                    <input
-                      type={showAdminKey ? "text" : "password"}
-                      value={adminKey}
-                      onChange={e => { setAdminKey(e.target.value); setAdminError(""); }}
-                      onKeyDown={e => e.key === "Enter" && handleAdminKeySubmit()}
-                      placeholder="Enter admin key"
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white font-mono text-sm placeholder-slate-600 focus:outline-none focus:border-amber-500/50 pr-10"
-                      autoFocus
-                    />
-                    <button onClick={() => setShowAdminKey(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer">
-                      {showAdminKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {adminError && <p className="mt-2 text-xs text-rose-400 font-semibold">{adminError}</p>}
-                  <button
-                    onClick={handleAdminKeySubmit}
-                    disabled={adminLoading}
-                    className="mt-4 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-sm py-3 rounded-xl cursor-pointer transition-all disabled:opacity-50"
-                  >
-                    {adminLoading ? "Sending OTP..." : <><ArrowRight className="w-4 h-4" /> Send Verification Code</>}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div className="bg-emerald-900/20 border border-emerald-500/30 rounded-xl px-3 py-2 mb-3 text-xs text-emerald-400">
-                    📧 {adminOtpMsg}
-                  </div>
+              <div>
+                <label className="flex items-center gap-1.5 text-xs font-bold text-slate-400 mb-1.5">
+                  <Mail className="w-3 h-3" />
+                  {tc("Email", "ኢሜይል")}
+                </label>
+                <input
+                  type="email"
+                  value={adminEmail}
+                  onChange={e => { setAdminEmail(e.target.value); setAdminError(""); }}
+                  placeholder="admin@example.com"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500/50"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="flex items-center gap-1.5 text-xs font-bold text-slate-400 mb-1.5">
+                  <Lock className="w-3 h-3" />
+                  {tc("Password", "የይለፍ ቃል")}
+                </label>
+                <div className="relative">
                   <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={adminOtp}
-                    onChange={e => { setAdminOtp(e.target.value.replace(/\D/g, "")); setAdminError(""); }}
-                    onKeyDown={e => e.key === "Enter" && handleAdminOtpSubmit()}
-                    placeholder="Enter 6-digit OTP"
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white font-mono text-xl tracking-[0.5em] text-center placeholder-slate-600 focus:outline-none focus:border-amber-500/50"
-                    autoFocus
+                    type={showAdminPass ? "text" : "password"}
+                    value={adminPassword}
+                    onChange={e => { setAdminPassword(e.target.value); setAdminError(""); }}
+                    placeholder={tc("Enter your password", "የይለፍ ቃልዎን ያስገቡ")}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500/50 pr-10"
                   />
-                  {adminError && <p className="mt-2 text-xs text-rose-400 font-semibold">{adminError}</p>}
-                  <button
-                    onClick={handleAdminOtpSubmit}
-                    disabled={adminLoading || adminOtp.length < 6}
-                    className="mt-4 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-sm py-3 rounded-xl cursor-pointer transition-all disabled:opacity-50"
-                  >
-                    {adminLoading ? "Verifying..." : <><Shield className="w-4 h-4" /> Confirm & Login</>}
+                  <button onClick={() => setShowAdminPass(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer">
+                    {showAdminPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
-                  <button
-                    onClick={() => { setAdminStep("key"); setAdminOtp(""); setAdminError(""); }}
-                    className="mt-2 w-full text-xs text-slate-600 hover:text-slate-400 cursor-pointer py-1"
-                  >
-                    ← Resend / use different key
-                  </button>
-                </>
+                </div>
+              </div>
+
+              {adminError && (
+                <p className="text-xs text-rose-400 font-semibold bg-rose-500/10 border border-rose-500/20 rounded-xl px-3 py-2">
+                  ⚠ {adminError}
+                </p>
               )}
+
+              <button
+                onClick={handleAdminLogin}
+                disabled={adminLoading}
+                className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-sm py-3 rounded-xl cursor-pointer transition-all disabled:opacity-50"
+              >
+                {adminLoading
+                  ? tc("Verifying...", "በማረጋገጥ ላይ...")
+                  : <><Shield className="w-4 h-4" /> {tc("Login", "ግባ")}</>}
+              </button>
             </div>
-            <button onClick={() => { setShowAdmin(false); setAdminStep("key"); setAdminOtp(""); setAdminKey(""); setAdminError(""); }} className="w-full text-xs text-slate-600 hover:text-slate-400 cursor-pointer py-2">
-              ← Back
+            <button
+              onClick={() => { setShowAdmin(false); setAdminEmail(""); setAdminPassword(""); setAdminError(""); }}
+              className="w-full text-xs text-slate-600 hover:text-slate-400 cursor-pointer py-2"
+            >
+              ← {tc("Back", "ተመለስ")}
             </button>
           </div>
 
@@ -380,7 +364,7 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
                   {tc("Owner / Manager Login", "የባለቤት መግቢያ")}
                 </button>
                 <button
-                  onClick={() => { setShowSecret(false); setShowAdmin(true); setAdminError(""); setAdminKey(""); }}
+                  onClick={() => { setShowSecret(false); setShowAdmin(true); setAdminError(""); setAdminEmail(""); setAdminPassword(""); }}
                   className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-slate-400 text-xs font-bold hover:bg-slate-700 transition-all cursor-pointer"
                 >
                   <Shield className="w-4 h-4" />
@@ -489,7 +473,7 @@ export default function PinLogin({ onAuth, onRegister, onSuperAdmin, onBack, isA
                 type="text"
                 value={tenantCode}
                 onChange={e => { setTenantCode(e.target.value.toUpperCase()); setCodeError(""); }}
-                placeholder={tc("Restaurant code (e.g. HABESHA)", "የሬስቶራንት ኮድ")}
+                placeholder={tc("Restaurant code (e.g. DEMO)", "የሬስቶራንት ኮድ")}
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white font-mono text-sm placeholder-slate-600 focus:outline-none focus:border-amber-500/50 tracking-widest uppercase"
                 autoFocus
               />

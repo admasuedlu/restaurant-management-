@@ -6,7 +6,7 @@ import {
   Search, Eye, ChevronDown
 } from "lucide-react";
 
-// Use session token issued after OTP — never expose the raw admin key in the bundle
+// Use session token issued after email + password login
 const getAdminHeaders = () => ({
   "Content-Type": "application/json",
   "X-Admin-Token": sessionStorage.getItem("admin_token") ?? "",
@@ -263,10 +263,10 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
-      t.businessName.toLowerCase().includes(q) ||
-      t.ownerName.toLowerCase().includes(q) ||
-      t.code.toLowerCase().includes(q) ||
-      t.phone.includes(q)
+      (t.businessName || "").toLowerCase().includes(q) ||
+      (t.ownerName || "").toLowerCase().includes(q) ||
+      (t.code || "").toLowerCase().includes(q) ||
+      (t.phone || "").includes(q)
     );
   });
 
@@ -390,13 +390,13 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
                         p.subscriptionStatus === "expired" ? "bg-rose-500/20 text-rose-400 border-rose-500/30" :
                         p.subscriptionStatus === "grace"   ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
                         "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
-                      }`}>{p.subscriptionStatus.toUpperCase()}</span>
+                      }`}>{(p.subscriptionStatus || "unknown").toUpperCase()}</span>
                       <span className="text-[10px] font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">{p.tenantCode}</span>
                     </div>
                     <div className="flex flex-wrap gap-3 text-xs text-slate-500">
                       <span className="flex items-center gap-1"><Users className="w-3 h-3" />{p.ownerName}</span>
                       <span className="flex items-center gap-1"><Phone className="w-3 h-3" />{p.phone}</span>
-                      <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />{p.monthlyFee.toLocaleString()} ETB/mo</span>
+                      <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />{(p.monthlyFee || 0).toLocaleString()} ETB/mo</span>
                       {p.subscriptionEnd && <span className="flex items-center gap-1"><Clock className="w-3 h-3" />Ends: {new Date(p.subscriptionEnd).toLocaleDateString()}</span>}
                       {p.daysOverdue > 0 && (
                         <span className={`flex items-center gap-1 font-bold ${p.daysOverdue > 7 ? "text-rose-400" : "text-amber-400"}`}>
@@ -435,7 +435,7 @@ export default function SuperAdminDashboard({ onLogout }: { onLogout: () => void
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-sm font-black text-slate-100">{t.businessName}</h3>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${STATUS_COLOR[t.status] ?? "text-slate-400 bg-slate-800 border-slate-700"}`}>
-                        {t.status.toUpperCase()}
+                        {(t.status || "unknown").toUpperCase()}
                       </span>
                       <span className="text-[10px] font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">{t.code}</span>
                       <span className="text-[10px] text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">{t.plan}</span>

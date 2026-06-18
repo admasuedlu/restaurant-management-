@@ -1,6 +1,6 @@
 {
-  "name": "Habesha Restaurant OS",
-  "description": "Bilingual Unified Restaurant Operating System for Ethiopia featuring QR Menu Customer Ordering, Waiter POS, Kitchen Display, Inventory control, Telebirr & ERCA tax compliance simulation, and AI business analysis.",
+  "name": "Aura Hotel Solutions",
+  "description": "Bilingual unified hotel and restaurant operating system featuring QR menu ordering, POS, kitchen display, inventory control, Telebirr payments, and AI business analysis.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

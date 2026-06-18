@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props {
   orderId: string;
@@ -26,7 +27,7 @@ export default function ReceiptPrinter({ orderId, tenantCode, onClose, isAmharic
   const printRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetch(`/api/orders/${orderId}/receipt`, { headers: { "X-Tenant-Code": tenantCode } })
+    apiFetch(`/api/orders/${orderId}/receipt`)
       .then(r => r.json())
       .then(d => { setReceipt(d); setLoading(false); })
       .catch(() => setLoading(false));

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -31,8 +32,8 @@ export default function ShiftManager({ tenantCode, isAmharic }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     const [shiftR, staffR] = await Promise.all([
-      fetch(`/api/shifts?date=${today}`, { headers: { "X-Tenant-Code": tenantCode } }),
-      fetch("/api/staff", { headers: { "X-Tenant-Code": tenantCode } }),
+      apiFetch(`/api/shifts?date=${today}`),
+      apiFetch("/api/staff"),
     ]);
     if (shiftR.ok) setShifts(await shiftR.json());
     if (staffR.ok) setStaff(await staffR.json());
@@ -40,7 +41,7 @@ export default function ShiftManager({ tenantCode, isAmharic }: Props) {
   }, [tenantCode, today]);
 
   const loadSummary = useCallback(async () => {
-    const r = await fetch(`/api/shifts/summary?month=${month}`, { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch(`/api/shifts/summary?month=${month}`);
     if (r.ok) setSummary(await r.json());
   }, [tenantCode, month]);
 
@@ -52,9 +53,9 @@ export default function ShiftManager({ tenantCode, isAmharic }: Props) {
     setSaving("in");
     const member = staff.find(s => s.id === clockInId);
     if (!member) return;
-    const r = await fetch("/api/shifts/clock-in", {
+    const r = await apiFetch("/api/shifts/clock-in", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ staffId: member.id, staffName: member.name, role: member.role, branch: member.branch }),
     });
     const data = await r.json();
@@ -66,9 +67,9 @@ export default function ShiftManager({ tenantCode, isAmharic }: Props) {
   const clockOut = async (staffId: string) => {
     setSaving(staffId);
     const t = tips ? Number(tips) : 0;
-    const r = await fetch("/api/shifts/clock-out", {
+    const r = await apiFetch("/api/shifts/clock-out", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Tenant-Code": tenantCode },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ staffId, tips: t }),
     });
     if (!r.ok) { const d = await r.json(); alert(d.error); }

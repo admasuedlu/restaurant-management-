@@ -1,6 +1,3 @@
-import dotenv from "dotenv";
-dotenv.config(); // Must run BEFORE database import so DATABASE_URL is set
-
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -9,15 +6,25 @@ import nodemailer from "nodemailer";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
+import cors from "cors";
+import jwt from "jsonwebtoken";
+import { randomBytes } from "crypto";
+import { config, logConfigWarnings } from "./src/config";
 import { pool, initSchema, query, transaction } from "./src/lib/database";
 
 const app  = express();
-const PORT = Number(process.env.PORT) || 3000;
+app.set("trust proxy", 1);
+const PORT = config.port;
 
 // ─── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet({
-  contentSecurityPolicy: false, // Vite/React handles its own CSP
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
+}));
+
+app.use(cors({
+  origin: config.appUrl || true,
+  credentials: true,
 }));
 
 // Global rate limit — 200 requests per minute per IP
@@ -110,15 +117,16 @@ const PLAN_LIMITS: Record<SubscriptionPlan, { branches: number; staff: number; a
 
 // ─── Email / OTP ─────────────────────────────────────────────────────────────
 
-const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || "ediluadmasu@gmail.com";
+const SUPER_ADMIN_EMAIL    = config.superAdminEmail;
+const SUPER_ADMIN_PASSWORD = config.superAdminPassword;
 
 const emailTransporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 465,
   secure: true,          // SSL on port 465
   auth: {
-    user: process.env.EMAIL_USER || "",
-    pass: (process.env.EMAIL_PASS || "").replace(/\s/g, ""), // strip spaces from app password
+    user: config.emailUser,
+    pass: config.emailPass,
   },
   connectionTimeout: 10000,
   greetingTimeout:   10000,
@@ -132,15 +140,15 @@ function generateOTP(): string {
 async function sendOTPEmail(to: string, otp: string, purpose: "register" | "superadmin", businessName?: string): Promise<void> {
   const isAdmin = purpose === "superadmin";
   const subject = isAdmin
-    ? "🔐 Habesha POS — Super Admin Login OTP"
-    : `✅ Habesha POS — Verify Your Restaurant Registration`;
+    ? "🔐 Aura Hotel Solutions — Super Admin Login OTP"
+    : `✅ Aura Hotel Solutions — Verify Your Restaurant Registration`;
 
   const html = isAdmin ? `
     <div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0f172a;color:#e2e8f0;padding:32px;border-radius:16px">
       <div style="text-align:center;margin-bottom:24px">
         <div style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#ef4444);width:56px;height:56px;border-radius:14px;line-height:56px;font-size:24px;font-weight:900;color:#0f172a">H</div>
         <h2 style="color:#fbbf24;margin:12px 0 4px">Super Admin Access</h2>
-        <p style="color:#64748b;font-size:13px;margin:0">Habesha Restaurant OS</p>
+        <p style="color:#64748b;font-size:13px;margin:0">Aura Hotel Solutions</p>
       </div>
       <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;text-align:center">
         <p style="color:#94a3b8;font-size:14px;margin:0 0 16px">Your one-time login code:</p>
@@ -161,14 +169,14 @@ async function sendOTPEmail(to: string, otp: string, purpose: "register" | "supe
         <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#10b981;font-family:monospace">${otp}</div>
         <p style="color:#64748b;font-size:12px;margin:16px 0 0">Expires in <strong style="color:#fbbf24">15 minutes</strong>.</p>
       </div>
-      <p style="color:#475569;font-size:12px;margin-top:20px">Welcome to Habesha POS — the restaurant OS built for Ethiopia. 🇪🇹</p>
+      <p style="color:#475569;font-size:12px;margin-top:20px">Welcome to Aura Hotel Solutions — hotel & restaurant management built for Ethiopia. 🇪🇹</p>
     </div>
   `;
 
   // 20-second hard timeout so the request never hangs forever
   await Promise.race([
     emailTransporter.sendMail({
-      from: `"Habesha POS" <${process.env.EMAIL_USER}>`,
+      from: `"Aura Hotel Solutions" <${config.emailUser}>`,
       to,
       subject,
       html,
@@ -395,7 +403,7 @@ async function pushNotification(tenantId: string, orderId: string, tableId: stri
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-interface TenantRequest extends Request { tenant?: Tenant; }
+interface TenantRequest extends Request { tenant?: Tenant; staffRole?: string; }
 
 async function requireTenant(req: TenantRequest, res: Response, next: NextFunction) {
   const code = (req.headers["x-tenant-code"] as string || req.query.tenant as string || "").toUpperCase().trim();
@@ -426,20 +434,80 @@ async function requireTenant(req: TenantRequest, res: Response, next: NextFuncti
   }
 }
 
+// ─── JWT Auth ────────────────────────────────────────────────────────────────
+
+const JWT_SECRET  = config.jwtSecret;
+const JWT_EXPIRES = "12h";
+
+function signJWT(payload: { sub: string; tenantCode: string; role: string }): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+
+async function requireAuth(req: TenantRequest, res: Response, next: NextFunction) {
+  const auth = req.headers["authorization"] as string | undefined;
+  if (!auth?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Authentication required. Please log in." });
+  }
+  const token = auth.slice(7);
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { sub: string; tenantCode: string; role: string };
+    const tenant = await getTenant(payload.tenantCode);
+    if (!tenant) return res.status(401).json({ error: "Restaurant not found." });
+    if ((tenant.status as string) === "pending") {
+      return res.status(403).json({ error: "Registration pending approval.", status: "pending" });
+    }
+    const { status, trialDaysLeft, daysOverdue, graceEnds } = getSubscriptionStatus(tenant);
+    if (status === "expired" || status === "suspended" || status === "cancelled") {
+      return res.status(402).json({
+        error: "Subscription expired or suspended.", status,
+        tenantId: tenant.id, businessName: tenant.businessName,
+        daysOverdue, plan: tenant.plan, monthlyFee: tenant.monthlyFee,
+        ownerPhone: tenant.phone,
+      });
+    }
+    req.tenant    = { ...tenant, status };
+    req.staffRole = payload.role;
+    (req as any).trialDaysLeft = trialDaysLeft;
+    (req as any).daysOverdue   = daysOverdue;
+    (req as any).graceEnds     = graceEnds;
+    next();
+  } catch (e: any) {
+    if (e.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Session expired, please log in again." });
+    }
+    return res.status(401).json({ error: "Invalid token." });
+  }
+}
+
+// ─── Role-based access control ───────────────────────────────────────────────
+
+function requireRole(...roles: string[]) {
+  return (req: TenantRequest, res: Response, next: NextFunction) => {
+    if (!req.staffRole || !roles.includes(req.staffRole)) {
+      return res.status(403).json({ error: "Access denied: insufficient permissions." });
+    }
+    next();
+  };
+}
+
+const rMgr   = requireRole("manager", "owner", "superadmin");
+const rOwner = requireRole("owner", "superadmin");
+const rCash  = requireRole("cashier", "manager", "owner", "superadmin");
+
 // ─── Gemini AI ────────────────────────────────────────────────────────────────
 
 let ai: GoogleGenAI | null = null;
-const apiKey = process.env.GEMINI_API_KEY;
+const apiKey = config.geminiApiKey;
 if (apiKey) {
   try { ai = new GoogleGenAI({ apiKey, httpOptions: { headers: { "User-Agent": "aistudio-build" } } }); }
   catch (e) { console.error("Gemini init error:", e); }
 } else { console.warn("⚠️  GEMINI_API_KEY not set — AI will use fallback."); }
 
-app.use(express.json());
+app.use(express.json({ limit: "12mb" })); // increased for room image/video uploads
 
 // ─── ADMIN ────────────────────────────────────────────────────────────────────
 
-const ADMIN_KEY = process.env.ADMIN_KEY || "habesha-admin-2024";
+const ADMIN_KEY = config.adminKey;
 
 // In-memory admin session tokens (token → expiry). Resets on server restart.
 const adminSessions = new Map<string, number>();
@@ -453,17 +521,23 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
     adminSessions.delete(token);
     return res.status(401).json({ error: "Session expired, please log in again" });
   }
-  if (rawKey === ADMIN_KEY) return next();
+  if (rawKey === ADMIN_KEY) {
+    if (config.isProd) {
+      return res.status(403).json({ error: "Admin key login disabled in production. Use session token." });
+    }
+    return next();
+  }
   return res.status(403).json({ error: "Admin access denied" });
 }
 
-// Issue a session token after OTP verified
+// Issue a session token after email + password verified
 app.post("/api/admin/session", authLimiter, async (req: Request, res: Response) => {
-  const { otp } = req.body;
-  if (!otp) return res.status(400).json({ error: "OTP required" });
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
   try {
-    const valid = await verifyOTP(SUPER_ADMIN_EMAIL, otp, "superadmin");
-    if (!valid) return res.status(401).json({ error: "Invalid or expired OTP" });
+    const emailOk = String(email).toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+    const passOk  = String(password) === SUPER_ADMIN_PASSWORD;
+    if (!emailOk || !passOk) return res.status(401).json({ error: "Invalid email or password" });
     const { randomBytes } = await import("crypto");
     const token = randomBytes(32).toString("hex");
     adminSessions.set(token, Date.now() + 8 * 60 * 60 * 1000); // 8h
@@ -542,10 +616,13 @@ app.delete("/api/admin/tenants/:id", requireAdmin, async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/admin/login", (req, res) => {
-  const { key } = req.body;
-  if (key !== ADMIN_KEY) return res.status(403).json({ error: "Invalid admin key" });
-  res.json({ id: "superadmin-1", name: "Super Admin", role: "superadmin", tenantCode: "SUPERADMIN", tenantName: "Habesha OS Admin" });
+app.post("/api/admin/login", authLimiter, (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+  const emailOk = String(email).toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+  const passOk  = String(password) === SUPER_ADMIN_PASSWORD;
+  if (!emailOk || !passOk) return res.status(401).json({ error: "Invalid email or password" });
+  res.json({ id: "superadmin-1", name: "Super Admin", role: "superadmin", tenantCode: "SUPERADMIN", tenantName: "Aura Hotel Solutions Admin" });
 });
 
 // ─── REGISTRATION ─────────────────────────────────────────────────────────────
@@ -588,6 +665,7 @@ app.post("/api/register", async (req, res) => {
       [`owner-${tenantId}`, tenantId, ownerName, "main"]);
     // Seed default settings
     await query(`INSERT INTO settings (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING`, [tenantId]);
+    await ensureDefaultBranch(tenantId, businessName, phone);
 
     res.status(201).json({ success: true, code, businessName, plan, businessSize, status: "pending",
       message: `Registration submitted! Your restaurant code is ${code}. Awaiting admin approval.` });
@@ -600,7 +678,7 @@ app.post("/api/register", async (req, res) => {
 app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
   const { email, businessName } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
+  if (!config.emailUser || !config.emailPass)
     return res.status(503).json({ error: "Email service not configured. Contact admin." });
   try {
     const recent = await query(
@@ -633,8 +711,8 @@ app.post("/api/auth/verify-otp", authLimiter, async (req: Request, res: Response
 app.post("/api/admin/send-otp", authLimiter, async (req: Request, res: Response) => {
   const { key } = req.body;
   if (!key) return res.status(400).json({ error: "Admin key required" });
-  if (key !== process.env.ADMIN_KEY) return res.status(401).json({ error: "Invalid admin key" });
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS)
+  if (key !== config.adminKey) return res.status(401).json({ error: "Invalid admin key" });
+  if (!config.emailUser || !config.emailPass)
     return res.status(503).json({ error: "Email service not configured." });
   try {
     const otp = await createOTP(SUPER_ADMIN_EMAIL, "superadmin");
@@ -688,10 +766,10 @@ app.post("/api/subscription/renew", async (req: TenantRequest, res) => {
 
 // ─── CHAPA PAYMENT INTEGRATION ───────────────────────────────────────────────
 
-const CHAPA_SECRET     = process.env.CHAPA_SECRET_KEY || "";
-const CHAPA_ENC_KEY    = process.env.CHAPA_ENCRYPTION_KEY || "";
+const CHAPA_SECRET     = config.chapaSecretKey;
+const CHAPA_ENC_KEY    = config.chapaEncryptionKey;
 const CHAPA_API        = "https://api.chapa.co/v1";
-const APP_URL          = process.env.APP_URL || "http://localhost:3000";
+const APP_URL          = config.appUrl;
 
 // Initiate a Chapa payment for subscription renewal
 app.post("/api/subscription/initiate-payment", async (req: Request, res: Response) => {
@@ -741,7 +819,7 @@ app.post("/api/subscription/initiate-payment", async (req: Request, res: Respons
         tx_ref:       txRef,
         callback_url: `${APP_URL}/api/subscription/chapa-webhook`,
         return_url:   `${APP_URL}/payment-success?ref=${txRef}`,
-        "customization[title]":       "Habesha POS Subscription",
+        "customization[title]":       "Aura Hotel Solutions Subscription",
         "customization[description]": `${PLAN_LIMITS[planKey].label} — ${months} month(s) for ${t.businessName}`,
         "customization[logo]":        `${APP_URL}/logo.png`,
       }),
@@ -855,7 +933,7 @@ app.get("/api/subscription/payment-result", async (req: Request, res: Response) 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/subscription/status", requireTenant, (req: TenantRequest, res) => {
+app.get("/api/subscription/status", requireAuth, (req: TenantRequest, res) => {
   const { status, trialDaysLeft, daysOverdue, graceEnds } = getSubscriptionStatus(req.tenant!);
   res.json({ status, plan: req.tenant!.plan, trialDaysLeft, daysOverdue, graceEnds,
     subscriptionEnd: req.tenant!.subscriptionEnd, monthlyFee: req.tenant!.monthlyFee,
@@ -870,9 +948,9 @@ app.get("/api/admin/payment-status", requireAdmin, async (req, res) => {
     const result = all.map(t => {
       const { status, trialDaysLeft, daysOverdue, graceEnds } = getSubscriptionStatus(t);
       return {
-        id: t.id, code: t.code, businessName: t.businessName, ownerName: t.ownerName,
+        tenantId: t.id, tenantCode: t.code, businessName: t.businessName, ownerName: t.ownerName,
         phone: t.phone, plan: t.plan, monthlyFee: t.monthlyFee,
-        status, trialDaysLeft, daysOverdue, graceEnds,
+        subscriptionStatus: status, trialDaysLeft, daysOverdue, graceEnds,
         subscriptionEnd: t.subscriptionEnd, createdAt: t.createdAt,
         businessSize: (t as any).businessSize || "medium",
       };
@@ -881,17 +959,9 @@ app.get("/api/admin/payment-status", requireAdmin, async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Admin: suspend a tenant manually
-app.post("/api/admin/tenants/:id/suspend", requireAdmin, async (req, res) => {
-  try {
-    await query("UPDATE tenants SET status='suspended' WHERE id=$1", [req.params.id]);
-    res.json({ success: true });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
-app.post("/api/auth/pin", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/auth/pin", authLimiter, requireTenant, async (req: TenantRequest, res) => {
   const { pin } = req.body;
   if (!pin) return res.status(400).json({ error: "PIN required" });
   try {
@@ -900,6 +970,7 @@ app.post("/api/auth/pin", requireTenant, async (req: TenantRequest, res) => {
     const staff = rowToStaff(r.rows[0]);
     const { pin: _omit, ...safe } = staff;
     const { status, trialDaysLeft } = getSubscriptionStatus(req.tenant!);
+    const token = signJWT({ sub: staff.id, tenantCode: req.tenant!.code, role: staff.role });
     res.json({ ...safe, tenantId: req.tenant!.id, tenantCode: req.tenant!.code,
       tenantName: req.tenant!.businessName, plan: req.tenant!.plan,
       subscriptionStatus: status, trialDaysLeft,
@@ -907,7 +978,8 @@ app.post("/api/auth/pin", requireTenant, async (req: TenantRequest, res) => {
       graceEnds:   (req as any).graceEnds   ?? null,
       subscriptionEnd: req.tenant!.subscriptionEnd,
       monthlyFee:  req.tenant!.monthlyFee,
-      businessSize: (req.tenant! as any).businessSize ?? "medium" });
+      businessSize: (req.tenant! as any).businessSize ?? "medium",
+      token });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -953,19 +1025,21 @@ app.post("/api/auth/owner-login", authLimiter, async (req, res) => {
     const sr = await query("SELECT * FROM staff WHERE tenant_id=$1 AND role='owner' LIMIT 1", [tenant.id]);
     const ownerStaff = sr.rows.length ? rowToStaff(sr.rows[0]) : { id: "owner-1", name: tenant.ownerName, role: "owner", pin: "", branch: "main" };
     const { status: s2, trialDaysLeft: t2, daysOverdue: d2, graceEnds: g2 } = getSubscriptionStatus(tenant);
+    const token = signJWT({ sub: ownerStaff.id, tenantCode: tenant.code, role: "owner" });
     res.json({ id: ownerStaff.id, name: ownerStaff.name, role: "owner",
       tenantId: tenant.id, tenantCode: tenant.code, tenantName: tenant.businessName,
       plan: tenant.plan, subscriptionStatus: s2, trialDaysLeft: t2,
       daysOverdue: d2, graceEnds: g2,
       subscriptionEnd: tenant.subscriptionEnd,
       monthlyFee: tenant.monthlyFee,
-      businessSize: r.rows[0].business_size || "medium" });
+      businessSize: r.rows[0].business_size || "medium",
+      token });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── TENANT INFO ──────────────────────────────────────────────────────────────
 
-app.get("/api/tenant", requireTenant, (req: TenantRequest, res) => {
+app.get("/api/tenant", requireAuth, (req: TenantRequest, res) => {
   const t = req.tenant!;
   const { status, trialDaysLeft } = getSubscriptionStatus(t);
   res.json({ id: t.id, code: t.code, businessName: t.businessName, ownerName: t.ownerName,
@@ -973,16 +1047,168 @@ app.get("/api/tenant", requireTenant, (req: TenantRequest, res) => {
     branches: t.branches, subscriptionEnd: t.subscriptionEnd, trialEnd: t.trialEnd });
 });
 
+// ─── TABLE ASSIGNMENTS ────────────────────────────────────────────────────────
+
+// Get all table assignments (manager/owner)
+app.get("/api/table-assignments", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const r = await query("SELECT table_id, staff_id, staff_name FROM table_assignments WHERE tenant_id=$1 ORDER BY table_id", [req.tenant!.id]);
+    res.json(r.rows.map((row: any) => ({ tableId: row.table_id, staffId: row.staff_id, staffName: row.staff_name })));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Save all table assignments (manager/owner)
+app.post("/api/table-assignments", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { assignments } = req.body;
+  if (!Array.isArray(assignments)) return res.status(400).json({ error: "assignments array required" });
+  try {
+    await query("DELETE FROM table_assignments WHERE tenant_id=$1", [req.tenant!.id]);
+    for (const a of assignments) {
+      if (a.tableId && a.staffId && a.staffName) {
+        await query("INSERT INTO table_assignments (tenant_id,table_id,staff_id,staff_name) VALUES ($1,$2,$3,$4)",
+          [req.tenant!.id, String(a.tableId).toUpperCase(), a.staffId, a.staffName]);
+      }
+    }
+    res.json({ success: true, count: assignments.length });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// Get tables assigned to the current logged-in waiter
+app.get("/api/table-assignments/mine", requireAuth, async (req: TenantRequest, res) => {
+  try {
+    const token = (req.headers.authorization || "").replace("Bearer ", "");
+    const payload = jwt.verify(token, JWT_SECRET) as { sub: string; tenantCode: string; role: string };
+    const r = await query("SELECT table_id FROM table_assignments WHERE tenant_id=$1 AND staff_id=$2",
+      [req.tenant!.id, payload.sub]);
+    res.json(r.rows.map((row: any) => row.table_id));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── BRANCHES ─────────────────────────────────────────────────────────────────
+
+function rowToBranch(r: any) {
+  return {
+    id: r.id,
+    name: r.name,
+    ameName: r.ame_name || r.name,
+    location: r.location || "",
+    phone: r.phone || "",
+    capacity: Number(r.capacity) || 20,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+  };
+}
+
+function slugifyBranch(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "branch";
+}
+
+async function syncTenantBranches(tenantId: string): Promise<string[]> {
+  const r = await query(
+    `SELECT id FROM branch_locations WHERE tenant_id=$1 ORDER BY created_at ASC`,
+    [tenantId]
+  );
+  const ids = r.rows.map((row: { id: string }) => row.id);
+  await query(`UPDATE tenants SET branches=$1 WHERE id=$2`, [ids.length ? ids : ["main"], tenantId]);
+  return ids.length ? ids : ["main"];
+}
+
+async function ensureDefaultBranch(tenantId: string, businessName: string, phone = ""): Promise<void> {
+  const existing = await query(`SELECT id FROM branch_locations WHERE tenant_id=$1 LIMIT 1`, [tenantId]);
+  if (existing.rows.length) return;
+  await query(
+    `INSERT INTO branch_locations (id, tenant_id, name, ame_name, location, phone, capacity)
+     VALUES ('main', $1, $2, $3, $4, $5, 30) ON CONFLICT DO NOTHING`,
+    [tenantId, `${businessName} — Main`, "ዋና ቅርንጫፍ", "Main location", phone]
+  );
+  await syncTenantBranches(tenantId);
+}
+
+app.get("/api/branches", requireAuth, async (req: TenantRequest, res) => {
+  try {
+    await ensureDefaultBranch(req.tenant!.id, req.tenant!.businessName, req.tenant!.phone);
+    const r = await query(
+      `SELECT * FROM branch_locations WHERE tenant_id=$1 ORDER BY created_at ASC`,
+      [req.tenant!.id]
+    );
+    const limit = PLAN_LIMITS[req.tenant!.plan]?.branches ?? 1;
+    res.json({ branches: r.rows.map(rowToBranch), limit, plan: req.tenant!.plan });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/branches", requireAuth, rOwner, async (req: TenantRequest, res) => {
+  const { name, ameName, location, phone, capacity } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: "Branch name is required" });
+  try {
+    await ensureDefaultBranch(req.tenant!.id, req.tenant!.businessName, req.tenant!.phone);
+    const countR = await query(`SELECT COUNT(*) FROM branch_locations WHERE tenant_id=$1`, [req.tenant!.id]);
+    const count = Number(countR.rows[0].count);
+    const limit = PLAN_LIMITS[req.tenant!.plan]?.branches ?? 1;
+    if (count >= limit) {
+      return res.status(403).json({
+        error: `Your ${req.tenant!.plan} plan allows up to ${limit} branch(es). Upgrade to add more.`,
+        limit, current: count,
+      });
+    }
+    let slug = slugifyBranch(String(name));
+    let suffix = 1;
+    while ((await query(`SELECT id FROM branch_locations WHERE tenant_id=$1 AND id=$2`, [req.tenant!.id, slug])).rows.length) {
+      slug = `${slugifyBranch(String(name))}-${suffix++}`;
+    }
+    await query(
+      `INSERT INTO branch_locations (id, tenant_id, name, ame_name, location, phone, capacity)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [slug, req.tenant!.id, String(name).trim(), ameName || String(name).trim(),
+       location || "", phone || "", Number(capacity) || 20]
+    );
+    await syncTenantBranches(req.tenant!.id);
+    const row = await query(`SELECT * FROM branch_locations WHERE tenant_id=$1 AND id=$2`, [req.tenant!.id, slug]);
+    res.status(201).json(rowToBranch(row.rows[0]));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch("/api/branches/:id", requireAuth, rOwner, async (req: TenantRequest, res) => {
+  const { name, ameName, location, phone, capacity } = req.body;
+  try {
+    const cur = await query(`SELECT * FROM branch_locations WHERE tenant_id=$1 AND id=$2`, [req.tenant!.id, req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: "Branch not found" });
+    const b = cur.rows[0];
+    await query(
+      `UPDATE branch_locations SET name=$1, ame_name=$2, location=$3, phone=$4, capacity=$5
+       WHERE tenant_id=$6 AND id=$7`,
+      [name ?? b.name, ameName ?? b.ame_name, location ?? b.location, phone ?? b.phone,
+       capacity !== undefined ? Number(capacity) : b.capacity, req.tenant!.id, req.params.id]
+    );
+    const row = await query(`SELECT * FROM branch_locations WHERE tenant_id=$1 AND id=$2`, [req.tenant!.id, req.params.id]);
+    res.json(rowToBranch(row.rows[0]));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/branches/:id", requireAuth, rOwner, async (req: TenantRequest, res) => {
+  if (req.params.id === "main") return res.status(400).json({ error: "Cannot delete the main branch" });
+  try {
+    const countR = await query(`SELECT COUNT(*) FROM branch_locations WHERE tenant_id=$1`, [req.tenant!.id]);
+    if (Number(countR.rows[0].count) <= 1) return res.status(400).json({ error: "At least one branch is required" });
+    const staffR = await query(`SELECT COUNT(*) FROM staff WHERE tenant_id=$1 AND branch=$2`, [req.tenant!.id, req.params.id]);
+    if (Number(staffR.rows[0].count) > 0) {
+      return res.status(400).json({ error: "Reassign staff before deleting this branch" });
+    }
+    const del = await query(`DELETE FROM branch_locations WHERE tenant_id=$1 AND id=$2 RETURNING id`, [req.tenant!.id, req.params.id]);
+    if (!del.rows.length) return res.status(404).json({ error: "Branch not found" });
+    await syncTenantBranches(req.tenant!.id);
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── MENU ─────────────────────────────────────────────────────────────────────
 
-app.get("/api/menu", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/menu", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM menu_items WHERE tenant_id=$1 ORDER BY popularity DESC", [req.tenant!.id]);
     res.json(r.rows.map(rowToMenuItem));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/menu", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/menu", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { name, ameName, price, category, description, ameDescription, prepTime, image, popularity, combosSuggestion } = req.body;
   if (!name || !price || !category) return res.status(400).json({ error: "name, price, category required" });
   try {
@@ -998,7 +1224,7 @@ app.post("/api/menu", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/menu/:id", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/menu/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM menu_items WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1011,7 +1237,7 @@ app.patch("/api/menu/:id", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/menu/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/menu/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM menu_items WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1020,14 +1246,19 @@ app.delete("/api/menu/:id", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
-app.get("/api/orders", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/orders", requireAuth, async (req: TenantRequest, res) => {
   try {
-    const r = await query("SELECT * FROM orders WHERE tenant_id=$1 ORDER BY creation_time DESC", [req.tenant!.id]);
+    const limit  = Math.min(Number(req.query.limit)  || 300, 1000);
+    const offset = Math.max(Number(req.query.offset) || 0,   0);
+    const r = await query(
+      "SELECT * FROM orders WHERE tenant_id=$1 ORDER BY creation_time DESC LIMIT $2 OFFSET $3",
+      [req.tenant!.id, limit, offset]
+    );
     res.json(r.rows.map(rowToOrder));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/orders", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/orders", requireAuth, async (req: TenantRequest, res) => {
   const { tableId, type, items, subtotal, isVip, waiterName } = req.body;
   if (!items || items.length === 0) return res.status(400).json({ error: "No items" });
   try {
@@ -1046,7 +1277,7 @@ app.post("/api/orders", requireTenant, async (req: TenantRequest, res) => {
       const stTax = parseFloat((stSub * 0.15).toFixed(2));
       const stamped = stItems.map(i => ({ ...i, itemStation: station, itemStatus: "Pending" as ItemStatus }));
       const order: Order = {
-        id: `ORD-${Math.floor(100 + Math.random() * 900)}${station === "bar" ? "-B" : ""}`,
+        id: `ORD-${randomBytes(3).toString("hex").toUpperCase()}${station === "bar" ? "-B" : ""}`,
         tableId: tableId || "Counter", type: type || "Dine-in", items: stamped,
         subtotal: stSub, tax: stTax, total: parseFloat((stSub + stTax).toFixed(2)),
         status: "Pending", paymentStatus: "Unpaid",
@@ -1084,7 +1315,7 @@ app.post("/api/orders", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/orders/:id/status", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/orders/:id/status", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM orders WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1093,7 +1324,7 @@ app.patch("/api/orders/:id/status", requireTenant, async (req: TenantRequest, re
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/orders/:id/items/:index/status", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/orders/:id/items/:index/status", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM orders WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Order not found" });
@@ -1114,7 +1345,7 @@ app.patch("/api/orders/:id/items/:index/status", requireTenant, async (req: Tena
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/orders/:id/pay", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/orders/:id/pay", requireAuth, rCash, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM orders WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1126,28 +1357,28 @@ app.patch("/api/orders/:id/pay", requireTenant, async (req: TenantRequest, res) 
 
 // ─── INVENTORY ────────────────────────────────────────────────────────────────
 
-app.get("/api/inventory", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/inventory", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM inventory WHERE tenant_id=$1 ORDER BY name", [req.tenant!.id]);
     res.json(r.rows.map(rowToInventory));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/inventory/kitchen", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/inventory/kitchen", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM inventory WHERE tenant_id=$1 AND station IN ('kitchen','both') ORDER BY name", [req.tenant!.id]);
     res.json(r.rows.map(rowToInventory));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/inventory/bar", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/inventory/bar", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM inventory WHERE tenant_id=$1 AND station IN ('bar','both') ORDER BY name", [req.tenant!.id]);
     res.json(r.rows.map(rowToInventory));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/inventory", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/inventory", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { name, ameName, stock, unit, cost, minAlert, category, station } = req.body;
   if (!name || !unit || !category) return res.status(400).json({ error: "name, unit, category required" });
   try {
@@ -1159,7 +1390,7 @@ app.post("/api/inventory", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/inventory/adjust", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/inventory/adjust", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM inventory WHERE id=$1 AND tenant_id=$2", [req.body.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1171,14 +1402,14 @@ app.post("/api/inventory/adjust", requireTenant, async (req: TenantRequest, res)
 
 // ─── PURCHASE ORDERS ─────────────────────────────────────────────────────────
 
-app.get("/api/purchase-orders", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/purchase-orders", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM purchase_orders WHERE tenant_id=$1 ORDER BY date DESC", [req.tenant!.id]);
     res.json(r.rows.map(rowToPO));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/purchase-orders", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/purchase-orders", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { supplier, item, qty, cost } = req.body;
   if (!item || !qty) return res.status(400).json({ error: "item and qty required" });
   try {
@@ -1191,7 +1422,7 @@ app.post("/api/purchase-orders", requireTenant, async (req: TenantRequest, res) 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/purchase-orders/:id/status", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/purchase-orders/:id/status", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM purchase_orders WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1207,14 +1438,14 @@ app.patch("/api/purchase-orders/:id/status", requireTenant, async (req: TenantRe
 
 // ─── STAFF ────────────────────────────────────────────────────────────────────
 
-app.get("/api/staff", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/staff", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT id, tenant_id, name, role, branch FROM staff WHERE tenant_id=$1 ORDER BY name", [req.tenant!.id]);
     res.json(r.rows.map(rowToStaff));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/staff", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/staff", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { name, role, pin, branch } = req.body;
   if (!name || !role || !pin) return res.status(400).json({ error: "name, role, pin required" });
   try {
@@ -1230,7 +1461,7 @@ app.post("/api/staff", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/staff/:id", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/staff/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM staff WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Not found" });
@@ -1247,7 +1478,7 @@ app.patch("/api/staff/:id", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/staff/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/staff/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM staff WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1256,7 +1487,7 @@ app.delete("/api/staff/:id", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
-app.get("/api/notifications", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/notifications", requireAuth, async (req: TenantRequest, res) => {
   try {
     const { waiter } = req.query;
     const r = waiter
@@ -1266,7 +1497,7 @@ app.get("/api/notifications", requireTenant, async (req: TenantRequest, res) => 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/notifications/read-all", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/notifications/read-all", requireAuth, async (req: TenantRequest, res) => {
   try {
     await query("UPDATE notifications SET is_read=TRUE WHERE tenant_id=$1", [req.tenant!.id]);
     res.json({ success: true });
@@ -1275,13 +1506,13 @@ app.patch("/api/notifications/read-all", requireTenant, async (req: TenantReques
 
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 
-app.get("/api/settings", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/settings", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     res.json(await ensureSettings(req.tenant!.id));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/settings", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/settings", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { mode, allowWaiterDirectOrder, allowPartialServing, notifyWaiterOnReady, notifyCashierOnReady } = req.body;
     await query(`INSERT INTO settings (tenant_id, mode, allow_waiter_direct_order, allow_partial_serving, notify_waiter_on_ready, notify_cashier_on_ready)
@@ -1299,7 +1530,7 @@ app.patch("/api/settings", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── AI INSIGHTS ─────────────────────────────────────────────────────────────
 
-app.post("/api/ai-insights", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/ai-insights", requireAuth, rOwner, async (req: TenantRequest, res) => {
   const limits = PLAN_LIMITS[req.tenant!.plan];
   if (!limits.aiInsights) return res.status(403).json({ error: "AI Insights requires Professional or Enterprise plan." });
   const { salesSummary, inventorySummary, currentBranch, lang } = req.body;
@@ -1307,7 +1538,7 @@ app.post("/api/ai-insights", requireTenant, async (req: TenantRequest, res) => {
   try {
     if (ai) {
       const r = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: "gemini-1.5-flash",
         contents: `Branch: ${currentBranch}. Sales: ${salesSummary?.totalSales} ETB. Top: ${salesSummary?.topDish}. Teff: ${inventorySummary?.teffStock}kg, Kibe: ${inventorySummary?.butterStock}kg.`,
         config: { systemInstruction: `You are "Admasu-AI", an advanced restaurant business intelligence consultant for Ethiopian hospitality. Provide 4 actionable bullet points as HTML.`, temperature: 0.85 },
       });
@@ -1320,7 +1551,7 @@ app.post("/api/ai-insights", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── ANALYTICS / SALES DASHBOARD ─────────────────────────────────────────────
 
-app.get("/api/analytics/sales", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/analytics/sales", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { period = "today", branch } = req.query;
     const tid = req.tenant!.id;
@@ -1399,7 +1630,7 @@ app.get("/api/analytics/sales", requireTenant, async (req: TenantRequest, res) =
 });
 
 // Compare today vs yesterday
-app.get("/api/analytics/compare", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/analytics/compare", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const tid = req.tenant!.id;
     const today = new Date(); today.setHours(0,0,0,0);
@@ -1417,7 +1648,7 @@ app.get("/api/analytics/compare", requireTenant, async (req: TenantRequest, res)
 
 // ─── EXPENSES ────────────────────────────────────────────────────────────────
 
-app.get("/api/expenses", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/expenses", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { from, to } = req.query;
     let q = "SELECT * FROM expenses WHERE tenant_id=$1";
@@ -1430,7 +1661,7 @@ app.get("/api/expenses", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/expenses", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/expenses", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { category, description, amount, date, branch } = req.body;
   if (!category || !description || !amount) return res.status(400).json({ error: "category, description, amount required" });
   try {
@@ -1443,7 +1674,7 @@ app.post("/api/expenses", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/expenses/:id", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/expenses/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { category, description, amount, date } = req.body;
     await query(`UPDATE expenses SET category=$1, description=$2, amount=$3, date=$4 WHERE id=$5 AND tenant_id=$6`,
@@ -1453,7 +1684,7 @@ app.patch("/api/expenses/:id", requireTenant, async (req: TenantRequest, res) =>
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/expenses/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/expenses/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM expenses WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1462,7 +1693,7 @@ app.delete("/api/expenses/:id", requireTenant, async (req: TenantRequest, res) =
 
 // ─── RECIPES ─────────────────────────────────────────────────────────────────
 
-app.get("/api/recipes", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/recipes", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query(`
       SELECT rec.*, mi.name as menu_name, mi.price as menu_price,
@@ -1475,7 +1706,7 @@ app.get("/api/recipes", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/recipes", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/recipes", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { menuItemId, inventoryId, qtyPerServe } = req.body;
   if (!menuItemId || !inventoryId || !qtyPerServe) return res.status(400).json({ error: "menuItemId, inventoryId, qtyPerServe required" });
   try {
@@ -1487,7 +1718,7 @@ app.post("/api/recipes", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/recipes/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/recipes/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM recipes WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1495,7 +1726,7 @@ app.delete("/api/recipes/:id", requireTenant, async (req: TenantRequest, res) =>
 });
 
 // Get cost breakdown for a menu item
-app.get("/api/recipes/cost/:menuItemId", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/recipes/cost/:menuItemId", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query(`
       SELECT rec.qty_per_serve, inv.name, inv.unit, inv.cost, inv.stock,
@@ -1511,7 +1742,7 @@ app.get("/api/recipes/cost/:menuItemId", requireTenant, async (req: TenantReques
 
 // ─── SHIFTS ──────────────────────────────────────────────────────────────────
 
-app.get("/api/shifts", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/shifts", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { date, staffId } = req.query;
     let q = "SELECT * FROM shifts WHERE tenant_id=$1";
@@ -1524,7 +1755,7 @@ app.get("/api/shifts", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/shifts/clock-in", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/shifts/clock-in", requireAuth, async (req: TenantRequest, res) => {
   const { staffId, staffName, role, branch } = req.body;
   if (!staffId || !staffName) return res.status(400).json({ error: "staffId and staffName required" });
   try {
@@ -1539,7 +1770,7 @@ app.post("/api/shifts/clock-in", requireTenant, async (req: TenantRequest, res) 
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/shifts/clock-out", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/shifts/clock-out", requireAuth, async (req: TenantRequest, res) => {
   const { staffId, tips, note } = req.body;
   if (!staffId) return res.status(400).json({ error: "staffId required" });
   try {
@@ -1554,7 +1785,7 @@ app.post("/api/shifts/clock-out", requireTenant, async (req: TenantRequest, res)
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/shifts/summary", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/shifts/summary", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { month } = req.query; // YYYY-MM
     const m = (month as string) || new Date().toISOString().slice(0,7);
@@ -1571,7 +1802,7 @@ app.get("/api/shifts/summary", requireTenant, async (req: TenantRequest, res) =>
 
 // ─── LOYALTY ─────────────────────────────────────────────────────────────────
 
-app.get("/api/loyalty", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/loyalty", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { phone } = req.query;
     if (phone) {
@@ -1583,7 +1814,7 @@ app.get("/api/loyalty", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/loyalty/register", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/loyalty/register", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { customerName, phone } = req.body;
   if (!customerName || !phone) return res.status(400).json({ error: "customerName and phone required" });
   try {
@@ -1595,7 +1826,7 @@ app.post("/api/loyalty/register", requireTenant, async (req: TenantRequest, res)
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/loyalty/add-points", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/loyalty/add-points", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { phone, amount } = req.body;
   if (!phone || !amount) return res.status(400).json({ error: "phone and amount required" });
   try {
@@ -1611,7 +1842,7 @@ app.post("/api/loyalty/add-points", requireTenant, async (req: TenantRequest, re
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/loyalty/redeem", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/loyalty/redeem", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { phone, points } = req.body;
   if (!phone || !points) return res.status(400).json({ error: "phone and points required" });
   try {
@@ -1645,7 +1876,7 @@ app.post("/api/public/:tenantCode/feedback", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/feedback", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/feedback", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM feedback WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100", [req.tenant!.id]);
     const avg = await query(`SELECT AVG(rating) as avg_rating, AVG(food_rating) as avg_food,
@@ -1656,7 +1887,7 @@ app.get("/api/feedback", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── RESERVATIONS ─────────────────────────────────────────────────────────────
 
-app.get("/api/reservations", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/reservations", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { date } = req.query;
     let q = "SELECT * FROM reservations WHERE tenant_id=$1";
@@ -1685,7 +1916,7 @@ app.post("/api/reservations", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/reservations/:id", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/reservations/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { status, tableId, note } = req.body;
     await query(`UPDATE reservations SET status=COALESCE($1,status), table_id=COALESCE($2,table_id), note=COALESCE($3,note) WHERE id=$4 AND tenant_id=$5`,
@@ -1695,7 +1926,7 @@ app.patch("/api/reservations/:id", requireTenant, async (req: TenantRequest, res
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/reservations/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/reservations/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM reservations WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1704,14 +1935,14 @@ app.delete("/api/reservations/:id", requireTenant, async (req: TenantRequest, re
 
 // ─── SUPPLIERS ────────────────────────────────────────────────────────────────
 
-app.get("/api/suppliers", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/suppliers", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM suppliers WHERE tenant_id=$1 ORDER BY name", [req.tenant!.id]);
     res.json(r.rows);
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/suppliers", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/suppliers", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { name, phone, email, address, category, note } = req.body;
   if (!name) return res.status(400).json({ error: "name required" });
   try {
@@ -1723,7 +1954,7 @@ app.post("/api/suppliers", requireTenant, async (req: TenantRequest, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch("/api/suppliers/:id", requireTenant, async (req: TenantRequest, res) => {
+app.patch("/api/suppliers/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     const { name, phone, email, address, category, note } = req.body;
     await query(`UPDATE suppliers SET name=$1,phone=$2,email=$3,address=$4,category=$5,note=$6 WHERE id=$7 AND tenant_id=$8`,
@@ -1733,7 +1964,7 @@ app.patch("/api/suppliers/:id", requireTenant, async (req: TenantRequest, res) =
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/api/suppliers/:id", requireTenant, async (req: TenantRequest, res) => {
+app.delete("/api/suppliers/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
   try {
     await query("DELETE FROM suppliers WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     res.json({ success: true });
@@ -1764,10 +1995,20 @@ app.post("/api/public/:tenantCode/order", async (req, res) => {
 
     const buildOrder = async (stItems: any[], station: "kitchen"|"bar") => {
       if (!stItems.length) return;
-      const sub = stItems.reduce((s: number, i: any) => s + i.menuItem.price * i.quantity, 0);
+      // Validate prices against DB — never trust client-sent prices
+      const ids = stItems.map((i: any) => i.menuItem?.id).filter(Boolean);
+      const dbMenu = ids.length
+        ? await query(`SELECT id, price FROM menu_items WHERE tenant_id=$1 AND id=ANY($2)`, [tenant.id, ids])
+        : { rows: [] as any[] };
+      const priceMap: Record<string, number> = {};
+      for (const row of dbMenu.rows) priceMap[row.id] = parseFloat(row.price);
+      const sub = stItems.reduce((s: number, i: any) => {
+        const unitPrice = priceMap[i.menuItem?.id] ?? i.menuItem?.price ?? 0;
+        return s + unitPrice * i.quantity;
+      }, 0);
       const tax = parseFloat((sub * 0.15).toFixed(2));
       const stamped = stItems.map(i => ({ ...i, itemStation: station, itemStatus: "Pending" }));
-      const orderId = `ORD-QR-${Math.floor(100+Math.random()*900)}${station==="bar"?"-B":""}`;
+      const orderId = `ORD-QR-${randomBytes(3).toString("hex").toUpperCase()}${station==="bar"?"-B":""}`;
       await query(`INSERT INTO orders (id,tenant_id,table_id,type,items,subtotal,tax,total,status,payment_status,creation_time,station,group_id,customer_phone)
         VALUES ($1,$2,$3,'Dine-in',$4,$5,$6,$7,'Pending','Unpaid',NOW(),$8,$9,$10)`,
         [orderId, tenant.id, tableId||"QR", JSON.stringify(stamped), sub, tax, sub+tax, station, groupId, customerPhone||null]);
@@ -1795,9 +2036,682 @@ app.post("/api/public/:tenantCode/order", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HOTEL PROPERTY MANAGEMENT SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── HOTEL ROOMS ──────────────────────────────────────────────────────────────
+
+// GET all rooms with current booking info
+app.get("/api/hotel/rooms", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const rooms = await query(
+      `SELECT r.*,
+         b.id          AS booking_id,
+         b.guest_name,
+         b.guest_phone,
+         b.check_in_date,
+         b.check_out_date,
+         b.status       AS booking_status,
+         b.balance_due,
+         b.adults,
+         b.children
+       FROM hotel_rooms r
+       LEFT JOIN hotel_bookings b
+         ON b.room_id = r.id
+        AND b.tenant_id = r.tenant_id
+        AND b.status IN ('checked_in','reserved')
+       WHERE r.tenant_id = $1
+       ORDER BY r.floor ASC, r.room_number ASC`,
+      [req.tenant!.id]
+    );
+    res.json(rooms.rows);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST create room
+app.post("/api/hotel/rooms", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { roomNumber, roomType = "standard", floor = 1, capacity = 2,
+          pricePerNight, amenities = [], description = "", image = "" } = req.body;
+  if (!roomNumber || !pricePerNight) return res.status(400).json({ error: "roomNumber and pricePerNight required" });
+  try {
+    const id = `ROOM-${req.tenant!.id}-${Date.now()}`;
+    await query(
+      `INSERT INTO hotel_rooms (id,tenant_id,room_number,room_type,floor,capacity,price_per_night,amenities,description,status,image)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'available',$10)`,
+      [id, req.tenant!.id, roomNumber, roomType, floor, capacity, pricePerNight, amenities, description, image]
+    );
+    res.json({ id, roomNumber });
+  } catch (e: any) {
+    if (e.code === "23505") return res.status(409).json({ error: "Room number already exists" });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT update room
+app.put("/api/hotel/rooms/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { roomNumber, roomType, floor, capacity, pricePerNight, amenities, description, status, image } = req.body;
+  try {
+    await query(
+      `UPDATE hotel_rooms SET room_number=$1,room_type=$2,floor=$3,capacity=$4,
+       price_per_night=$5,amenities=$6,description=$7,status=COALESCE($8,status),image=COALESCE($9,image)
+       WHERE id=$10 AND tenant_id=$11`,
+      [roomNumber, roomType, floor, capacity, pricePerNight, amenities, description, status, image || null, req.params.id, req.tenant!.id]
+    );
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE room
+app.delete("/api/hotel/rooms/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    await query("DELETE FROM hotel_rooms WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH room status (housekeeping / maintenance)
+app.patch("/api/hotel/rooms/:id/status", requireAuth, async (req: TenantRequest, res) => {
+  const { status, staffName = "", notes = "" } = req.body;
+  if (!status) return res.status(400).json({ error: "status required" });
+  try {
+    await query("UPDATE hotel_rooms SET status=$1 WHERE id=$2 AND tenant_id=$3", [status, req.params.id, req.tenant!.id]);
+    // Log housekeeping action
+    const room = await query("SELECT room_number FROM hotel_rooms WHERE id=$1", [req.params.id]);
+    if (room.rows.length) {
+      await query(
+        `INSERT INTO housekeeping_logs (id,tenant_id,room_id,room_number,action,staff_name,notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [`HK-${Date.now()}`, req.tenant!.id, req.params.id, room.rows[0].room_number, status, staffName, notes]
+      );
+    }
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── HOTEL BOOKINGS ───────────────────────────────────────────────────────────
+
+// GET all bookings (with optional status filter)
+app.get("/api/hotel/bookings", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const { status, date } = req.query as any;
+    let sql = `SELECT b.*, COALESCE(SUM(c.amount * c.quantity),0) AS extra_charges
+               FROM hotel_bookings b
+               LEFT JOIN hotel_room_charges c ON c.booking_id = b.id
+               WHERE b.tenant_id=$1`;
+    const params: any[] = [req.tenant!.id];
+    if (status) { sql += ` AND b.status=$${params.length+1}`; params.push(status); }
+    if (date)   { sql += ` AND (b.check_in_date<=$${params.length+1} AND b.check_out_date>$${params.length+1})`; params.push(date); params.push(date); }
+    sql += " GROUP BY b.id ORDER BY b.created_at DESC LIMIT 200";
+    const r = await query(sql, params);
+    res.json(r.rows);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST create booking/reservation
+app.post("/api/hotel/bookings", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const {
+    roomId, guestName, guestPhone = "", guestIdNumber = "", guestNationality = "",
+    adults = 1, children = 0, checkInDate, checkOutDate,
+    bookingSource = "walk_in", discount = 0, advancePaid = 0,
+    specialRequests = "", notes = "", createdBy = ""
+  } = req.body;
+  if (!roomId || !guestName || !checkInDate || !checkOutDate)
+    return res.status(400).json({ error: "roomId, guestName, checkInDate, checkOutDate required" });
+  try {
+    // Get room info
+    const roomRes = await query("SELECT * FROM hotel_rooms WHERE id=$1 AND tenant_id=$2", [roomId, req.tenant!.id]);
+    if (!roomRes.rows.length) return res.status(404).json({ error: "Room not found" });
+    const room = roomRes.rows[0];
+
+    // Check for conflicts
+    const conflict = await query(
+      `SELECT id FROM hotel_bookings WHERE room_id=$1 AND tenant_id=$2
+       AND status IN ('reserved','checked_in')
+       AND check_in_date < $3 AND check_out_date > $4`,
+      [roomId, req.tenant!.id, checkOutDate, checkInDate]
+    );
+    if (conflict.rows.length) return res.status(409).json({ error: "Room already booked for those dates" });
+
+    const d1 = new Date(checkInDate), d2 = new Date(checkOutDate);
+    const nights = Math.max(1, Math.ceil((d2.getTime()-d1.getTime()) / 86400000));
+    const subtotal = room.price_per_night * nights;
+    const taxRate = 0.15;
+    const tax = (subtotal - discount) * taxRate;
+    const total = subtotal - discount + tax;
+    const balance = total - advancePaid;
+
+    const id = `BK-${req.tenant!.id}-${Date.now()}`;
+    await query(
+      `INSERT INTO hotel_bookings
+       (id,tenant_id,room_id,room_number,guest_name,guest_phone,guest_id_number,guest_nationality,
+        adults,children,check_in_date,check_out_date,status,booking_source,room_rate,total_nights,
+        subtotal,discount,tax,total,advance_paid,balance_due,payment_status,payment_method,
+        special_requests,notes,created_by)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'reserved',$13,$14,$15,$16,$17,$18,$19,$20,$21,
+              CASE WHEN $20>=$19 THEN 'paid' WHEN $20>0 THEN 'partial' ELSE 'unpaid' END,'',$22,$23,$24)`,
+      [id, req.tenant!.id, roomId, room.room_number, guestName, guestPhone, guestIdNumber,
+       guestNationality, adults, children, checkInDate, checkOutDate, bookingSource,
+       room.price_per_night, nights, subtotal, discount, tax, total, advancePaid, balance,
+       specialRequests, notes, createdBy]
+    );
+
+    // Mark room as reserved
+    await query("UPDATE hotel_rooms SET status='reserved' WHERE id=$1", [roomId]);
+    res.json({ id, roomNumber: room.room_number, total, balanceDue: balance, nights });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST check-in
+app.post("/api/hotel/bookings/:id/checkin", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const r = await query("SELECT * FROM hotel_bookings WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    if (!r.rows.length) return res.status(404).json({ error: "Booking not found" });
+    const b = r.rows[0];
+    if (b.status === "checked_in") return res.status(400).json({ error: "Already checked in" });
+    await query(
+      `UPDATE hotel_bookings SET status='checked_in', actual_check_in=NOW() WHERE id=$1`,
+      [req.params.id]
+    );
+    await query("UPDATE hotel_rooms SET status='occupied' WHERE id=$1", [b.room_id]);
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST check-out
+app.post("/api/hotel/bookings/:id/checkout", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { paymentMethod = "cash", finalPayment = 0 } = req.body;
+  try {
+    const r = await query("SELECT * FROM hotel_bookings WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    if (!r.rows.length) return res.status(404).json({ error: "Booking not found" });
+    const b = r.rows[0];
+
+    // Calculate total with extra charges
+    const extras = await query("SELECT SUM(amount*quantity) AS total FROM hotel_room_charges WHERE booking_id=$1", [req.params.id]);
+    const extraTotal = Number(extras.rows[0]?.total ?? 0);
+    const grandTotal = Number(b.total) + extraTotal;
+    const totalPaid  = Number(b.advance_paid) + Number(finalPayment);
+    const balance    = grandTotal - totalPaid;
+
+    await query(
+      `UPDATE hotel_bookings SET status='checked_out', actual_check_out=NOW(),
+       advance_paid=$1, balance_due=$2, payment_method=$3,
+       payment_status=CASE WHEN $2<=0 THEN 'paid' ELSE 'partial' END
+       WHERE id=$4`,
+      [totalPaid, Math.max(0, balance), paymentMethod, req.params.id]
+    );
+    await query("UPDATE hotel_rooms SET status='cleaning' WHERE id=$1", [b.room_id]);
+    res.json({ success: true, grandTotal, totalPaid, balance: Math.max(0, balance) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST cancel booking
+app.post("/api/hotel/bookings/:id/cancel", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const r = await query("SELECT * FROM hotel_bookings WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    if (!r.rows.length) return res.status(404).json({ error: "Booking not found" });
+    const b = r.rows[0];
+    await query("UPDATE hotel_bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
+    // Free up room if it was reserved/occupied by this booking
+    await query(
+      "UPDATE hotel_rooms SET status='available' WHERE id=$1 AND status IN ('reserved','occupied')",
+      [b.room_id]
+    );
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── ROOM CHARGES / FOLIO ─────────────────────────────────────────────────────
+
+// GET charges for a booking
+app.get("/api/hotel/bookings/:id/charges", requireAuth, async (req: TenantRequest, res) => {
+  try {
+    const r = await query(
+      "SELECT * FROM hotel_room_charges WHERE booking_id=$1 AND tenant_id=$2 ORDER BY date ASC",
+      [req.params.id, req.tenant!.id]
+    );
+    res.json(r.rows);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST add charge to booking
+app.post("/api/hotel/bookings/:id/charges", requireAuth, async (req: TenantRequest, res) => {
+  const { type = "other", description, amount, quantity = 1, addedBy = "" } = req.body;
+  if (!description || !amount) return res.status(400).json({ error: "description and amount required" });
+  try {
+    const booking = await query("SELECT * FROM hotel_bookings WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    if (!booking.rows.length) return res.status(404).json({ error: "Booking not found" });
+    const b = booking.rows[0];
+    const id = `CHG-${Date.now()}`;
+    await query(
+      `INSERT INTO hotel_room_charges (id,tenant_id,booking_id,room_id,room_number,type,description,amount,quantity,added_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, req.tenant!.id, req.params.id, b.room_id, b.room_number, type, description, amount, quantity, addedBy]
+    );
+    // Recalculate balance
+    const extras = await query("SELECT SUM(amount*quantity) AS total FROM hotel_room_charges WHERE booking_id=$1", [req.params.id]);
+    const extraTotal = Number(extras.rows[0]?.total ?? 0);
+    const newTotal = Number(b.subtotal) - Number(b.discount) + Number(b.tax) + extraTotal;
+    const newBalance = Math.max(0, newTotal - Number(b.advance_paid));
+    await query(
+      "UPDATE hotel_bookings SET balance_due=$1 WHERE id=$2",
+      [newBalance, req.params.id]
+    );
+    res.json({ id, newBalance });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE a charge
+app.delete("/api/hotel/charges/:id", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const c = await query("SELECT * FROM hotel_room_charges WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
+    if (!c.rows.length) return res.status(404).json({ error: "Charge not found" });
+    await query("DELETE FROM hotel_room_charges WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// GET housekeeping log
+app.get("/api/hotel/housekeeping", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  try {
+    const r = await query(
+      "SELECT * FROM housekeeping_logs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100",
+      [req.tenant!.id]
+    );
+    res.json(r.rows);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── TENANT PAYMENT SETTINGS (owner configures their own Chapa keys) ─────────
+
+// GET: owner reads their current payment settings (keys masked)
+app.get("/api/payment-settings", requireAuth, async (req: TenantRequest, res) => {
+  try {
+    const r = await query(
+      "SELECT chapa_secret_key, chapa_public_key, payment_enabled FROM settings WHERE tenant_id=$1",
+      [req.tenant!.id]
+    );
+    const row = r.rows[0] || {};
+    // Mask secret key — show only last 6 chars
+    const secret = row.chapa_secret_key || "";
+    res.json({
+      paymentEnabled: row.payment_enabled || false,
+      chapaPublicKey: row.chapa_public_key || "",
+      chapaSecretKeyMasked: secret.length > 6 ? "•••••••••••" + secret.slice(-6) : (secret ? "•••••" : ""),
+      hasSecretKey: secret.length > 0,
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST: owner saves their Chapa keys
+app.post("/api/payment-settings", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { chapaSecretKey, chapaPublicKey, paymentEnabled } = req.body;
+  try {
+    await query(`
+      INSERT INTO settings (tenant_id, chapa_secret_key, chapa_public_key, payment_enabled)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (tenant_id) DO UPDATE SET
+        chapa_secret_key = EXCLUDED.chapa_secret_key,
+        chapa_public_key = EXCLUDED.chapa_public_key,
+        payment_enabled  = EXCLUDED.payment_enabled
+    `, [req.tenant!.id, chapaSecretKey || "", chapaPublicKey || "", paymentEnabled ?? false]);
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PUBLIC BUSINESS DIRECTORY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET all active/trial businesses for public directory
+app.get("/api/public/directory", async (req, res) => {
+  try {
+    const r = await query(
+      `SELECT id, code, business_name, owner_name, phone, email, plan, status,
+              business_size, business_type, description, cover_image,
+              address, city, is_public, avg_rating, opening_hours, created_at
+       FROM tenants
+       WHERE status IN ('active','trial') AND COALESCE(is_public, true) = true
+       ORDER BY avg_rating DESC, created_at DESC`,
+      []
+    );
+    res.json(r.rows.map(t => ({
+      code:         t.code,
+      businessName: t.business_name,
+      phone:        t.phone,
+      plan:         t.plan,
+      businessType: t.business_type || "restaurant",
+      businessSize: t.business_size || "medium",
+      description:  t.description || "",
+      coverImage:   t.cover_image || "",
+      address:      t.address || "",
+      city:         t.city || "Addis Ababa",
+      avgRating:    Number(t.avg_rating || 0),
+      openingHours: t.opening_hours || "08:00–22:00",
+    })));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// GET full business profile: menu items + hotel rooms
+app.get("/api/public/directory/:code/profile", async (req, res) => {
+  try {
+    const tRes = await query(
+      `SELECT * FROM tenants WHERE UPPER(code)=UPPER($1) AND status IN ('active','trial')`,
+      [req.params.code]
+    );
+    if (!tRes.rows.length) return res.status(404).json({ error: "Business not found" });
+    const t = tRes.rows[0];
+
+    // Menu items
+    const menuRes = await query(
+      `SELECT id, name, ame_name, price, category, description, ame_description,
+              prep_time, image, popularity, is_available
+       FROM menu_items WHERE tenant_id=$1 AND is_available=true ORDER BY category, popularity DESC`,
+      [t.id]
+    );
+
+    // Hotel rooms
+    const roomRes = await query(
+      `SELECT id, room_number, room_type, floor, capacity, price_per_night,
+              amenities, description, status, image
+       FROM hotel_rooms WHERE tenant_id=$1 ORDER BY floor, room_number`,
+      [t.id]
+    );
+
+    // Recent ratings (avg)
+    const ratingRes = await query(
+      `SELECT ROUND(AVG(rating),1) AS avg, COUNT(*) AS total FROM feedback WHERE tenant_id=$1`,
+      [t.id]
+    );
+
+    res.json({
+      code:         t.code,
+      businessName: t.business_name,
+      phone:        t.phone,
+      email:        t.email || "",
+      businessType: t.business_type || "restaurant",
+      businessSize: t.business_size || "medium",
+      description:  t.description || "",
+      coverImage:   t.cover_image || "",
+      address:      t.address || "",
+      city:         t.city || "Addis Ababa",
+      openingHours: t.opening_hours || "08:00–22:00",
+      avgRating:    Number(ratingRes.rows[0]?.avg || 0),
+      totalReviews: Number(ratingRes.rows[0]?.total || 0),
+      menu:  menuRes.rows,
+      rooms: roomRes.rows.map(r => ({
+        id:            r.id,
+        roomNumber:    r.room_number,
+        roomType:      r.room_type,
+        floor:         r.floor,
+        capacity:      r.capacity,
+        pricePerNight: Number(r.price_per_night),
+        amenities:     r.amenities || [],
+        description:   r.description || "",
+        status:        r.status,
+        image:         r.image || "",
+      })),
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST public table reservation (restaurant)
+app.post("/api/public/directory/:code/reserve", async (req, res) => {
+  const { guestName, phone, guests = 2, date, time, note = "" } = req.body;
+  if (!guestName || !phone || !date || !time)
+    return res.status(400).json({ error: "Name, phone, date and time required" });
+  try {
+    const tRes = await query("SELECT * FROM tenants WHERE UPPER(code)=UPPER($1)", [req.params.code]);
+    if (!tRes.rows.length) return res.status(404).json({ error: "Business not found" });
+    const t = tRes.rows[0];
+    const id = `RES-${t.id}-${Date.now()}`;
+    await query(
+      `INSERT INTO reservations (id,tenant_id,customer_name,phone,guests,date,time,status,note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'Pending',$8)`,
+      [id, t.id, guestName, phone, guests, date, time, note]
+    );
+    res.json({ id, message: "Reservation submitted! The restaurant will confirm soon." });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST public hotel room inquiry/booking
+app.post("/api/public/directory/:code/book-room", async (req, res) => {
+  const { roomId, guestName, guestPhone, guestIdNumber = "", guestNationality = "",
+          adults = 1, children = 0, checkInDate, checkOutDate, specialRequests = "" } = req.body;
+  if (!roomId || !guestName || !guestPhone || !checkInDate || !checkOutDate)
+    return res.status(400).json({ error: "All fields required" });
+  try {
+    const tRes = await query("SELECT * FROM tenants WHERE UPPER(code)=UPPER($1)", [req.params.code]);
+    if (!tRes.rows.length) return res.status(404).json({ error: "Business not found" });
+    const t = tRes.rows[0];
+
+    const roomRes = await query(
+      "SELECT * FROM hotel_rooms WHERE id=$1 AND tenant_id=$2 AND status='available'",
+      [roomId, t.id]
+    );
+    if (!roomRes.rows.length) return res.status(409).json({ error: "Room not available" });
+    const room = roomRes.rows[0];
+
+    const nights = Math.max(1, Math.ceil((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / 86400000));
+    const subtotal = Number(room.price_per_night) * nights;
+    const tax = subtotal * 0.15;
+    const total = subtotal + tax;
+
+    const id = `BK-PUB-${t.id}-${Date.now()}`;
+    await query(
+      `INSERT INTO hotel_bookings
+       (id,tenant_id,room_id,room_number,guest_name,guest_phone,guest_id_number,guest_nationality,
+        adults,children,check_in_date,check_out_date,status,booking_source,room_rate,total_nights,
+        subtotal,tax,total,advance_paid,balance_due,payment_status,special_requests)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'reserved','online',$13,$14,$15,$16,$17,0,$17,'unpaid',$18)`,
+      [id, t.id, roomId, room.room_number, guestName, guestPhone, guestIdNumber, guestNationality,
+       adults, children, checkInDate, checkOutDate, room.price_per_night, nights, subtotal, tax, total, specialRequests]
+    );
+    await query("UPDATE hotel_rooms SET status='reserved' WHERE id=$1", [roomId]);
+    res.json({ id, roomNumber: room.room_number, total, nights, message: "Room reserved! The hotel will confirm your booking." });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT update tenant public profile (owner)
+app.put("/api/tenant/public-profile", requireAuth, rMgr, async (req: TenantRequest, res) => {
+  const { businessType, description, coverImage, address, city, openingHours, isPublic } = req.body;
+  try {
+    await query(
+      `UPDATE tenants SET business_type=COALESCE($1,business_type),
+       description=COALESCE($2,description), cover_image=COALESCE($3,cover_image),
+       address=COALESCE($4,address), city=COALESCE($5,city),
+       opening_hours=COALESCE($6,opening_hours), is_public=COALESCE($7,is_public)
+       WHERE id=$8`,
+      [businessType, description, coverImage, address, city, openingHours, isPublic, req.tenant!.id]
+    );
+    res.json({ success: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── QR SCAN-TO-PAY (Customer pays via Chapa after ordering) ─────────────────
+// Each tenant uses THEIR OWN Chapa account — money goes directly to the restaurant
+
+// Step 1: Customer initiates Chapa payment for their order(s)
+app.post("/api/public/:tenantCode/payment/initiate", async (req: Request, res: Response) => {
+  const { tenantCode } = req.params;
+  const { orderIds, amount, tableId, customerEmail, customerPhone } = req.body;
+
+  if (!Array.isArray(orderIds) || !orderIds.length || !amount)
+    return res.status(400).json({ error: "orderIds and amount required" });
+
+  try {
+    // Load tenant
+    const tRes = await query("SELECT * FROM tenants WHERE code=$1", [tenantCode.toUpperCase()]);
+    if (!tRes.rows.length) return res.status(404).json({ error: "Restaurant not found" });
+    const tenant = tRes.rows[0];
+
+    // Load TENANT'S OWN Chapa key from their settings
+    const settingsRes = await query(
+      "SELECT chapa_secret_key, payment_enabled FROM settings WHERE tenant_id=$1",
+      [tenant.id]
+    );
+    const settings = settingsRes.rows[0] || {};
+    const tenantChapaKey = settings.chapa_secret_key || "";
+    const paymentEnabled  = settings.payment_enabled  || false;
+
+    if (!paymentEnabled || !tenantChapaKey) {
+      return res.status(503).json({
+        error: "Online payment is not set up for this restaurant. Please pay at the counter.",
+        payAtCounter: true,
+      });
+    }
+
+    // Verify orders exist and belong to this tenant
+    const ordersRes = await query(
+      `SELECT id, total FROM orders WHERE id=ANY($1) AND tenant_id=$2`,
+      [orderIds, tenant.id]
+    );
+    if (!ordersRes.rows.length) return res.status(404).json({ error: "Orders not found" });
+
+    const txRef = `ORDPAY-${tenantCode.toUpperCase()}-${Date.now()}`;
+    const totalAmount = ordersRes.rows.reduce((s: number, r: any) => s + parseFloat(r.total), 0);
+
+    // Save pending transaction
+    await query(
+      `INSERT INTO order_payments (tx_ref, tenant_id, order_ids, amount, status, table_id)
+       VALUES ($1, $2, $3, $4, 'pending', $5)`,
+      [txRef, tenant.id, orderIds, totalAmount, tableId || "QR"]
+    );
+
+    // Call Chapa using THIS TENANT'S secret key
+    const chapaPayload: Record<string, string> = {
+      amount:           totalAmount.toFixed(2),
+      currency:         "ETB",
+      email:            customerEmail || `guest-${Date.now()}@${tenantCode.toLowerCase()}.aurahotel.app`,
+      phone_number:     customerPhone || "0900000000",
+      first_name:       "Guest",
+      last_name:        `Table ${tableId || "QR"}`,
+      tx_ref:           txRef,
+      callback_url:     `${APP_URL}/api/public/payment/webhook`,
+      return_url:       `${APP_URL}/payment-success?ref=${txRef}&type=order`,
+      "customization[title]":       tenant.business_name || "Restaurant Payment",
+      "customization[description]": `Order payment — Table ${tableId} — ${tenant.business_name}`,
+    };
+
+    const chapaRes = await fetch(`${CHAPA_API}/transaction/initialize`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${tenantChapaKey}`,   // ← tenant's own key
+        "Content-Type":  "application/json",
+      },
+      body: JSON.stringify(chapaPayload),
+    });
+
+    const chapaData = await chapaRes.json() as any;
+    if (!chapaRes.ok || chapaData.status !== "success") {
+      console.error(`[${tenantCode}] Chapa order-pay init failed:`, chapaData);
+      return res.status(502).json({ error: "Payment gateway error. Please pay at the counter." });
+    }
+
+    res.json({ checkoutUrl: chapaData.data.checkout_url, txRef, amount: totalAmount });
+  } catch (e: any) {
+    console.error("order-pay initiate error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Step 2: Chapa calls this webhook after customer completes payment
+app.post("/api/public/payment/webhook", express.json({ type: "*/*" }), async (req: Request, res: Response) => {
+  res.sendStatus(200); // Always respond 200 first
+
+  try {
+    const { trx_ref } = req.body || {};
+    const txRef = trx_ref || req.body?.data?.tx_ref || req.body?.tx_ref;
+    if (!txRef) return;
+
+    // Only handle order payments (subscription webhooks handled separately)
+    if (!txRef.startsWith("ORDPAY-")) return;
+
+    // Load the pending record to get tenant's Chapa key for verification
+    const rec = await query("SELECT * FROM order_payments WHERE tx_ref=$1", [txRef]);
+    if (!rec.rows.length || rec.rows[0].status === "completed") return;
+
+    const payment = rec.rows[0];
+
+    // Get this tenant's Chapa key to verify
+    const sRes = await query("SELECT chapa_secret_key FROM settings WHERE tenant_id=$1", [payment.tenant_id]);
+    const tenantKey = sRes.rows[0]?.chapa_secret_key || CHAPA_SECRET; // fallback to platform key
+
+    // Verify with Chapa using the tenant's key
+    const verifyRes = await fetch(`${CHAPA_API}/transaction/verify/${txRef}`, {
+      headers: { "Authorization": `Bearer ${tenantKey}` },
+    });
+    const verifyData = await verifyRes.json() as any;
+    if (!verifyRes.ok || verifyData.status !== "success" || verifyData.data?.status !== "success") {
+      console.warn("Chapa order-pay verify failed:", txRef, verifyData?.message);
+      return;
+    }
+
+    // Mark all orders as Paid
+
+    // Mark all orders as Paid
+    await query(
+      `UPDATE orders SET payment_status='Paid', payment_method='Chapa' WHERE id=ANY($1) AND tenant_id=$2`,
+      [payment.order_ids, payment.tenant_id]
+    );
+
+    // Mark transaction completed
+    await query(
+      `UPDATE order_payments SET status='completed', completed_at=NOW() WHERE tx_ref=$1`,
+      [txRef]
+    );
+
+    console.log(`✅ Customer Chapa payment confirmed: ${txRef} | orders: ${payment.order_ids.join(",")}`);
+  } catch (e: any) {
+    console.error("order-pay webhook error:", e.message);
+  }
+});
+
+// Step 3: Frontend polls this to check if payment landed
+app.get("/api/public/:tenantCode/payment/status", async (req: Request, res: Response) => {
+  const { txRef } = req.query as { txRef: string };
+  if (!txRef) return res.status(400).json({ error: "txRef required" });
+
+  try {
+    const rec = await query("SELECT status, order_ids, amount FROM order_payments WHERE tx_ref=$1", [txRef]);
+    if (!rec.rows.length) return res.status(404).json({ error: "Transaction not found" });
+
+    const row = rec.rows[0];
+    if (row.status === "completed") {
+      return res.json({ status: "completed", orderIds: row.order_ids, amount: row.amount });
+    }
+
+    // Check with Chapa if still pending — use TENANT's own key
+    const sRes = await query("SELECT chapa_secret_key FROM settings WHERE tenant_id=$1", [row.tenant_id]);
+    const tenantKey = sRes.rows[0]?.chapa_secret_key || "";
+    if (tenantKey) {
+      const vRes = await fetch(`${CHAPA_API}/transaction/verify/${txRef}`, {
+        headers: { "Authorization": `Bearer ${tenantKey}` },
+      });
+      const vData = await vRes.json() as any;
+      if (vRes.ok && vData.status === "success" && vData.data?.status === "success") {
+        const tRes = await query("SELECT tenant_id, order_ids FROM order_payments WHERE tx_ref=$1", [txRef]);
+        if (tRes.rows.length) {
+          const p = tRes.rows[0];
+          await query(
+            `UPDATE orders SET payment_status='Paid', payment_method='Chapa' WHERE id=ANY($1) AND tenant_id=$2`,
+            [p.order_ids, p.tenant_id]
+          );
+          await query(`UPDATE order_payments SET status='completed', completed_at=NOW() WHERE tx_ref=$1`, [txRef]);
+          return res.json({ status: "completed", orderIds: p.order_ids });
+        }
+      }
+    }
+
+    res.json({ status: "pending" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── RECEIPT ─────────────────────────────────────────────────────────────────
 
-app.get("/api/orders/:id/receipt", requireTenant, async (req: TenantRequest, res) => {
+app.get("/api/orders/:id/receipt", requireAuth, async (req: TenantRequest, res) => {
   try {
     const r = await query("SELECT * FROM orders WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenant!.id]);
     if (!r.rows.length) return res.status(404).json({ error: "Order not found" });
@@ -1833,7 +2747,7 @@ app.get("/api/orders/:id/receipt", requireTenant, async (req: TenantRequest, res
 
 // ─── TELEBIRR / PAYMENT MOCK ──────────────────────────────────────────────────
 
-app.post("/api/payment/telebirr/initiate", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/payment/telebirr/initiate", requireAuth, async (req: TenantRequest, res) => {
   const { orderId, amount, phone } = req.body;
   if (!orderId || !amount || !phone) return res.status(400).json({ error: "orderId, amount, phone required" });
   try {
@@ -1846,12 +2760,12 @@ app.post("/api/payment/telebirr/initiate", requireTenant, async (req: TenantRequ
       amount: Number(amount),
       phone,
       message: `Telebirr payment of ${amount} ETB initiated. Ref: ${ref}`,
-      instructions: `Please confirm payment of ${amount} ETB to Habesha Restaurant on your Telebirr app using reference ${ref}`,
+      instructions: `Please confirm payment of ${amount} ETB to Aura Hotel Solutions on your Telebirr app using reference ${ref}`,
     });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/payment/telebirr/verify", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/payment/telebirr/verify", requireAuth, async (req: TenantRequest, res) => {
   const { reference, orderId } = req.body;
   if (!reference || !orderId) return res.status(400).json({ error: "reference and orderId required" });
   try {
@@ -1863,7 +2777,7 @@ app.post("/api/payment/telebirr/verify", requireTenant, async (req: TenantReques
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/payment/cbe/initiate", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/payment/cbe/initiate", requireAuth, async (req: TenantRequest, res) => {
   const { orderId, amount, phone } = req.body;
   if (!orderId || !amount) return res.status(400).json({ error: "orderId and amount required" });
   try {
@@ -1879,13 +2793,13 @@ app.post("/api/payment/cbe/initiate", requireTenant, async (req: TenantRequest, 
 
 // ─── SMS NOTIFICATIONS (Mock / Ethio Telecom) ─────────────────────────────────
 
-app.post("/api/sms/send", requireTenant, async (req: TenantRequest, res) => {
+app.post("/api/sms/send", requireAuth, rMgr, async (req: TenantRequest, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.status(400).json({ error: "phone and message required" });
   try {
     // In production: integrate with Ethio Telecom SMS API or Africa's Talking
-    const SMS_API = process.env.SMS_API_URL;
-    const SMS_KEY = process.env.SMS_API_KEY;
+    const SMS_API = config.smsApiUrl;
+    const SMS_KEY = config.smsApiKey;
     if (SMS_API && SMS_KEY) {
       // Production call would go here
       console.log(`[SMS] To: ${phone} — ${message}`);
@@ -1900,7 +2814,7 @@ app.post("/api/sms/send", requireTenant, async (req: TenantRequest, res) => {
 
 // ─── Vite / Static ───────────────────────────────────────────────────────────
 
-if (process.env.NODE_ENV !== "production") {
+if (config.nodeEnv !== "production") {
   const startVite = async () => {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
@@ -1916,14 +2830,19 @@ if (process.env.NODE_ENV !== "production") {
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
 async function start() {
+  logConfigWarnings();
   try {
     await pool.connect().then(c => { c.release(); console.log("✅ PostgreSQL connected"); });
     await initSchema();
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`\n🍽️  Habesha Restaurant OS — SaaS Edition`);
+      console.log(`\n🏨  Aura Hotel Solutions — SaaS Edition`);
       console.log(`   Server   : http://localhost:${PORT}`);
       console.log(`   Database : PostgreSQL`);
-      console.log(`   Admin    : X-Admin-Key: ${ADMIN_KEY}\n`);
+      if (!config.isProd) {
+        console.log(`   Mode     : development (secrets from .env)\n`);
+      } else {
+        console.log(`   Mode     : production\n`);
+      }
     });
   } catch (e: any) {
     console.error("❌ Failed to connect to PostgreSQL:", e.message);

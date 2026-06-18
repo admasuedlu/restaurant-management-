@@ -58,9 +58,17 @@ import PublicFeedbackPage from "./components/PublicFeedbackPage";
 import RecipeManager from "./components/RecipeManager";
 import WaiterSummary from "./components/WaiterSummary";
 import BarInventory from "./components/BarInventory";
+import TableAssignmentManager from "./components/TableAssignmentManager";
+import BranchManager from "./components/BranchManager";
 import SubscriptionWall from "./components/SubscriptionWall";
 import PaymentSuccess from "./components/PaymentSuccess";
+import PaymentSettings from "./components/PaymentSettings";
+import SubscriptionTab from "./components/SubscriptionTab";
+import HotelManager from "./components/HotelManager";
+import PublicBusinessProfile from "./components/PublicBusinessProfile";
 import { splitItemsByStation, calcStationTotals, resolveOrderStation } from "./lib/orderRouting";
+import { PLATFORM_NAME, FOOTER_TAGLINE_EN, FOOTER_TAGLINE_AM, FOOTER_CREDIT_EN, FOOTER_CREDIT_AM } from "./lib/branding";
+import { apiFetch, setAuthToken } from "./lib/api";
 import {
   MenuItem,
   OrderItem,
@@ -72,6 +80,7 @@ import {
   Branch,
   StaffNotification,
   AuthUser,
+  TableAssignment,
 } from "./types";
 
 // Tabs each role is allowed to access and switch between
@@ -95,17 +104,11 @@ const SIZE_ALLOWED_TABS: Record<string, Array<'customer' | 'waiter' | 'kitchen' 
 
 // Owner sub-tabs enabled per size
 const SIZE_OWNER_SUBTABS: Record<string, string[]> = {
-  small:  ['sales', 'expenses'],
-  medium: ['sales', 'expenses', 'recipes', 'reservations', 'loyalty', 'feedback', 'qr'],
-  large:  ['sales', 'expenses', 'recipes', 'reservations', 'shifts', 'loyalty', 'suppliers', 'feedback', 'qr', 'barstock'],
+  small:  ['sales', 'expenses', 'payments', 'subscription', 'hotel'],
+  medium: ['sales', 'expenses', 'branches', 'recipes', 'reservations', 'loyalty', 'feedback', 'qr', 'payments', 'subscription', 'hotel'],
+  large:  ['sales', 'expenses', 'branches', 'recipes', 'reservations', 'shifts', 'loyalty', 'suppliers', 'feedback', 'qr', 'barstock', 'payments', 'subscription', 'hotel'],
 };
 
-function apiFetch(url: string, tenantCode: string | undefined, init: RequestInit = {}): Promise<Response> {
-  if (!tenantCode) return fetch(url, init);
-  const headers = new Headers(init.headers as HeadersInit);
-  headers.set("X-Tenant-Code", tenantCode);
-  return fetch(url, { ...init, headers });
-}
 
 export default function App() {
   // Auth state
@@ -173,27 +176,34 @@ export default function App() {
   const [cachedOrders, setCachedOrders] = useState<any[]>([]);
 
   // New feature states
-  const [ownerSubTab, setOwnerSubTab] = useState<"sales"|"expenses"|"recipes"|"reservations"|"shifts"|"loyalty"|"suppliers"|"feedback"|"qr"|"barstock">("sales");
+  const [ownerSubTab, setOwnerSubTab] = useState<"sales"|"expenses"|"branches"|"recipes"|"reservations"|"shifts"|"loyalty"|"suppliers"|"feedback"|"qr"|"barstock"|"payments"|"subscription"|"hotel">("sales");
   const [receiptOrderId, setReceiptOrderId] = useState<string | null>(null);
 
-  // Public page routing (QR menu / feedback / payment-success)
-  const publicPath = typeof window !== "undefined" ? window.location.pathname : "";
+  // Table-to-waiter assignments
+  const [tableAssignments, setTableAssignments] = useState<TableAssignment[]>([]);
+  const [myAssignedTableIds, setMyAssignedTableIds] = useState<string[]>([]);
+
+  // Public page routing (QR menu / feedback / payment-success / place)
+  const [currentPath, setCurrentPath] = useState(() => typeof window !== "undefined" ? window.location.pathname : "/");
+  useEffect(() => {
+    const handler = () => setCurrentPath(window.location.pathname);
+    window.addEventListener("popstate", handler);
+    return () => window.removeEventListener("popstate", handler);
+  }, []);
+  const publicPath = currentPath;
   const isQRMenu = publicPath.startsWith("/menu/");
   const isFeedbackPage = publicPath.startsWith("/feedback/");
   const isPaymentSuccess = publicPath.startsWith("/payment-success");
+  const isBusinessProfile = publicPath.startsWith("/place/");
+  const businessProfileCode = isBusinessProfile ? publicPath.split("/")[2] : "";
 
-  // Branches — derived from tenant's registered branches
-  const [tenantBranchIds, setTenantBranchIds] = useState<string[]>([]);
-  const branches: Branch[] = tenantBranchIds.map(id => ({
-    id: id as BranchId,
-    name: id.charAt(0).toUpperCase() + id.slice(1),
-    ameName: id,
-    location: "",
-    phone: "",
-    capacity: 0,
+  // Branches — loaded from API
+  const [branchList, setBranchList] = useState<Branch[]>([]);
+  const branches: Branch[] = branchList.map(b => ({
+    ...b,
     revenueToday: orders
       .filter(o => o.paymentStatus === "Paid")
-      .reduce((s, o) => s + o.total, 0),
+      .reduce((s, o) => s + o.total, 0) / Math.max(branchList.length, 1),
   }));
 
   // Load and refresh initial data
@@ -369,45 +379,63 @@ export default function App() {
     }
   };
 
-  const fetchAllData = async (code?: string) => {
+  const fetchAllData = async (code?: string, userRole?: string) => {
     const tc = code ?? authUser?.tenantCode;
+    const role = userRole ?? authUser?.role;
     try {
       const menuRes = await apiFetch("/api/menu", tc);
       if (menuRes.ok) setMenuItems(await menuRes.json());
 
-      const ordRes = await apiFetch("/api/orders", tc);
-      if (ordRes.ok) setOrders(await ordRes.json());
+      // Only fetch authenticated endpoints if we have a logged-in user role
+      if (role) {
+        const ordRes = await apiFetch("/api/orders", tc);
+        if (ordRes.ok) setOrders(await ordRes.json());
 
-      const invRes = await apiFetch("/api/inventory", tc);
-      if (invRes.ok) setInventoryList(await invRes.json());
+        const invRes = await apiFetch("/api/inventory", tc);
+        if (invRes.ok) setInventoryList(await invRes.json());
 
-      const poRes = await apiFetch("/api/purchase-orders", tc);
-      if (poRes.ok) setPurchaseOrders(await poRes.json());
+        // Only manager / owner / superadmin roles can access purchase orders
+        if (["manager", "owner", "superadmin"].includes(role)) {
+          const poRes = await apiFetch("/api/purchase-orders", tc);
+          if (poRes.ok) setPurchaseOrders(await poRes.json());
+        }
 
-      // Load staff from API (names/roles only — PINs never sent)
-      const staffRes = await apiFetch("/api/staff", tc);
-      if (staffRes.ok) {
-        const apiStaff = await staffRes.json();
-        setStaffList(apiStaff
-          .filter((s: any) => s.role !== "customer")
-          .map((s: any) => ({
-            id: s.id,
-            name: s.name,
-            role: s.role.charAt(0).toUpperCase() + s.role.slice(1) as StaffMember["role"],
-            status: "Active" as const,
-            shift: "Morning",
-            stats: { ordersHandled: 0 },
-          }))
-        );
-      }
+        // Load staff from API (names/roles only — PINs never sent)
+        const staffRes = await apiFetch("/api/staff", tc);
+        if (staffRes.ok) {
+          const apiStaff = await staffRes.json();
+          setStaffList(apiStaff
+            .filter((s: any) => s.role !== "customer")
+            .map((s: any) => ({
+              id: s.id,
+              name: s.name,
+              role: s.role.charAt(0).toUpperCase() + s.role.slice(1) as StaffMember["role"],
+              status: "Active" as const,
+              shift: "Morning",
+              stats: { ordersHandled: 0 },
+            }))
+          );
+        }
 
-      // Load tenant branches
-      const tenantRes = await apiFetch("/api/tenant", tc);
-      if (tenantRes.ok) {
-        const tenantData = await tenantRes.json();
-        if (tenantData.branches?.length) {
-          setTenantBranchIds(tenantData.branches);
-          setCurrentBranch(tenantData.branches[0]);
+        // Load branches
+        const branchRes = await apiFetch("/api/branches", tc);
+        if (branchRes.ok) {
+          const branchData = await branchRes.json();
+          const loaded: Branch[] = (branchData.branches || []).map((b: {
+            id: string; name: string; ameName: string; location: string; phone: string; capacity: number;
+          }) => ({
+            id: b.id,
+            name: b.name,
+            ameName: b.ameName || b.name,
+            location: b.location || "",
+            phone: b.phone || "",
+            capacity: b.capacity || 20,
+            revenueToday: 0,
+          }));
+          if (loaded.length) {
+            setBranchList(loaded);
+            setCurrentBranch(prev => loaded.some(b => b.id === prev) ? prev : loaded[0].id);
+          }
         }
       }
     } catch (e) {
@@ -993,11 +1021,24 @@ export default function App() {
     setActiveTab(allowed.includes(preferredTab as any) ? preferredTab : (allowed[0] ?? "customer") as typeof activeTab);
     // Reset owner sub-tab to avoid showing a tab filtered out by size
     if (user.role === "owner" || user.role === "superadmin") setOwnerSubTab("sales");
-    // Re-fetch with this user's tenant code
-    fetchAllData(user.tenantCode);
+    // Store JWT so all subsequent apiFetch calls are authenticated
+    setAuthToken(user.token ?? null);
+    // Re-fetch with this user's tenant code and role
+    fetchAllData(user.tenantCode, user.role);
+
+    // If waiter: fetch which tables are assigned to me
+    if (user.role === "waiter" && user.token) {
+      apiFetch("/api/table-assignments/mine", user.tenantCode).then(async res => {
+        if (res.ok) {
+          const ids: string[] = await res.json();
+          setMyAssignedTableIds(ids.map(id => id.toUpperCase()));
+        }
+      }).catch(() => {});
+    }
   };
 
   const handleLogout = () => {
+    setAuthToken(null);
     setAuthUser(null);
     setActiveTab("customer");
   };
@@ -1009,6 +1050,15 @@ export default function App() {
   };
 
   // Public routes — QR menu, feedback, payment success
+  if (isBusinessProfile && businessProfileCode) {
+    return (
+      <PublicBusinessProfile
+        code={businessProfileCode}
+        isAmharic={isAmharic}
+        onBack={() => { window.history.pushState({}, "", "/"); window.dispatchEvent(new PopStateEvent("popstate")); }}
+      />
+    );
+  }
   if (isPaymentSuccess) {
     return <PaymentSuccess isAmharic={isAmharic} onContinue={() => { window.history.replaceState(null, "", "/"); handleLogout(); }} />;
   }
@@ -1051,7 +1101,7 @@ export default function App() {
   if (showSuperAdmin) {
     return (
       <SuperAdminDashboard
-        onLogout={() => { setShowSuperAdmin(false); setShowLanding(true); }}
+        onLogout={() => { sessionStorage.removeItem("admin_token"); setShowSuperAdmin(false); setShowLanding(true); }}
       />
     );
   }
@@ -2231,6 +2281,7 @@ export default function App() {
             updateOrderStatus={updateOrderStatus}
             getElapsedMinutes={getElapsedMinutes}
             onRefresh={fetchOrdersAndInventory}
+            assignedTableIds={myAssignedTableIds.length > 0 ? myAssignedTableIds : undefined}
           />
         )}
 
@@ -2665,7 +2716,7 @@ export default function App() {
                       
                       {/* Thermal Receipt jagged borders */}
                       <div className="text-center space-y-1 pb-4 border-b border-dashed border-slate-400">
-                        <h4 className="font-black text-sm tracking-tight text-slate-950 uppercase">Habesha Gastro OS</h4>
+                        <h4 className="font-black text-sm tracking-tight text-slate-950 uppercase">{PLATFORM_NAME}</h4>
                         <p className="text-[10px] uppercase">{currentBranch === 'bole' ? "Bole Main Medhanialem" : currentBranch === 'mercato' ? "Mercato Hub" : "Kazanchis Express"}</p>
                         <p className="text-[9px]">Addis Ababa, Ethiopia</p>
                         <p className="text-[9px] font-bold">TIN: 104593822 | ERCA REGISTERED</p>
@@ -2732,7 +2783,7 @@ export default function App() {
 
                       <div className="text-center pt-4 space-y-1 text-[9px] text-slate-500">
                         <p>*** THANK YOU / አመሰግናለሁ ***</p>
-                        <p>Powered by GastroOS Ethiopia</p>
+                        <p>Powered by {PLATFORM_NAME}</p>
                         <div className="w-16 h-16 bg-slate-250 mx-auto mt-2 border border-slate-300 flex items-center justify-center p-1 rounded">
                           <div className="grid grid-cols-4 gap-0.5 w-full h-full opacity-60">
                             {Array.from({length:16}).map((_, key)=>(
@@ -3341,6 +3392,13 @@ export default function App() {
 
             </div>
 
+            {/* ── TABLE ASSIGNMENTS ─────────────────────────────────────── */}
+            <TableAssignmentManager
+              isAmharic={isAmharic}
+              tenantCode={authUser.tenantCode}
+              staffList={staffList}
+            />
+
             {/* ── STAFF MANAGEMENT ──────────────────────────────────────── */}
             <div className="bg-slate-900 border border-slate-800 rounded-3xl shadow-xl p-6">
               <StaffManager
@@ -3348,6 +3406,7 @@ export default function App() {
                 isAmharic={isAmharic}
                 authUser={authUser}
                 tenantCode={authUser.tenantCode}
+                branches={branches}
                 onStaffChange={fetchOrdersAndInventory}
               />
             </div>
@@ -3364,6 +3423,7 @@ export default function App() {
                 {([
                   { key:"sales",        icon:"📊", en:"Sales",        am:"ሽያጭ" },
                   { key:"expenses",     icon:"💸", en:"Expenses",     am:"ወጪ" },
+                  { key:"branches",     icon:"🏢", en:"Branches",     am:"ቅርንጫፎች" },
                   { key:"recipes",      icon:"🧪", en:"Recipes",      am:"አዘገጃጀት" },
                   { key:"reservations", icon:"📅", en:"Reservations", am:"ቦታ ያዝ" },
                   { key:"shifts",       icon:"⏰", en:"Shifts",       am:"ፈረቃ" },
@@ -3372,6 +3432,9 @@ export default function App() {
                   { key:"feedback",     icon:"⭐", en:"Feedback",     am:"አስተያየት" },
                   { key:"qr",           icon:"📱", en:"QR Codes",     am:"QR ኮዶች" },
                   { key:"barstock",     icon:"🍺", en:"Bar Stock",     am:"የባር ክምችት" },
+                  { key:"payments",      icon:"💳", en:"Payments",      am:"ክፍያ" },
+                  { key:"subscription",  icon:"🔄", en:"Subscription",  am:"ደንበኝነት" },
+                  { key:"hotel",         icon:"🏨", en:"Hotel",          am:"ሆቴል" },
                 ] as const).filter(t => (SIZE_OWNER_SUBTABS[bizSize] ?? SIZE_OWNER_SUBTABS.large).includes(t.key)).map(t => (
                   <button key={t.key} onClick={() => setOwnerSubTab(t.key)}
                     className={`shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
@@ -3389,6 +3452,14 @@ export default function App() {
             <div className="bg-gray-900 rounded-2xl border border-gray-800 min-h-[400px]">
               {ownerSubTab === "sales" && <SalesDashboard tenantCode={authUser.tenantCode!} isAmharic={isAmharic} />}
               {ownerSubTab === "expenses" && <ExpenseTracker tenantCode={authUser.tenantCode!} isAmharic={isAmharic} />}
+              {ownerSubTab === "branches" && (
+                <BranchManager
+                  tenantCode={authUser.tenantCode!}
+                  isAmharic={isAmharic}
+                  plan={authUser.plan}
+                  onBranchesChange={fetchAllData}
+                />
+              )}
               {ownerSubTab === "recipes" && <RecipeManager tenantCode={authUser.tenantCode!} isAmharic={isAmharic} />}
               {ownerSubTab === "reservations" && <ReservationManager tenantCode={authUser.tenantCode!} isAmharic={isAmharic} />}
               {ownerSubTab === "shifts" && <ShiftManager tenantCode={authUser.tenantCode!} isAmharic={isAmharic} />}
@@ -3400,6 +3471,28 @@ export default function App() {
                 <div className="p-4">
                   <BarInventory tenantCode={authUser.tenantCode!} isAmharic={isAmharic} readOnly={true} />
                 </div>
+              )}
+              {ownerSubTab === "payments" && (
+                <PaymentSettings tenantCode={authUser.tenantCode} isAmharic={isAmharic} />
+              )}
+              {ownerSubTab === "hotel" && (
+                <HotelManager
+                  tenantCode={authUser.tenantCode}
+                  isAmharic={isAmharic}
+                  staffName={authUser.name}
+                />
+              )}
+              {ownerSubTab === "subscription" && (
+                <SubscriptionTab
+                  tenantCode={authUser.tenantCode ?? ""}
+                  currentPlan={authUser.plan ?? "starter"}
+                  subscriptionStatus={authUser.subscriptionStatus ?? "trial"}
+                  subscriptionEnd={authUser.subscriptionEnd ?? null}
+                  monthlyFee={authUser.monthlyFee ?? 0}
+                  trialDaysLeft={authUser.trialDaysLeft}
+                  daysOverdue={authUser.daysOverdue}
+                  isAmharic={isAmharic}
+                />
               )}
             </div>
           </div>
@@ -3417,17 +3510,14 @@ export default function App() {
 
       </main>
 
-      {/* Aesthetic Footer section referencing Ethiopian food standards */}
-      <footer className="bg-slate-950 border-t border-slate-900 py-8 text-center text-slate-600 text-xs text-medium">
+      <footer className="bg-slate-950 border-t border-slate-900 py-8 text-center text-slate-600 text-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-3">
           <div className="flex justify-center items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span>Habesha GastroOS • Integrated Payments & Unified Real-Time Sync</span>
+            <span>{isAmharic ? FOOTER_TAGLINE_AM : FOOTER_TAGLINE_EN}</span>
           </div>
-          <p className="text-[11px] leading-relaxed max-w-2xl mx-auto">
-            {isAmharic 
-              ? "ይህ ሲስተም የኢትዮጵያ ሬስቶራንት የስራ ፍሰትን በተለይ ለቴሌብር የክፍያ ስርአት፣ ከመስመር ውጭ በውጤታማነት እንዲሰራ እና የአድማሱ-አይ (Gemini) ትንተና የንግድ አቅምዎን እንዲያጎለብት ታስቦ የተሰራ ነው።"
-              : "Optimized for Ethiopian restaurant workflows focusing on Telebirr integration, robust offline local caching during internet brownouts, and ERCA tax machine simulation."}
+          <p className="text-[11px] leading-relaxed text-slate-500">
+            {isAmharic ? FOOTER_CREDIT_AM : FOOTER_CREDIT_EN}
           </p>
         </div>
       </footer>

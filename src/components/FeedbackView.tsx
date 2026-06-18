@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiFetch } from "../lib/api";
 
 interface Props { tenantCode: string; isAmharic: boolean; }
 
@@ -27,7 +28,7 @@ export default function FeedbackView({ tenantCode, isAmharic }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const r = await fetch("/api/feedback", { headers: { "X-Tenant-Code": tenantCode } });
+    const r = await apiFetch("/api/feedback");
     if (r.ok) { const d = await r.json(); setFeedback(d.feedback); setSummary(d.summary); }
     setLoading(false);
   }, [tenantCode]);
